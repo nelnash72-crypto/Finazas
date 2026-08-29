@@ -350,6 +350,7 @@ input,select{font-family:inherit; min-width:0; max-width:100%;}
         </div>
         <div class="card">
           <div class="section-title" style="margin-bottom:10px;">Presupuestos de este mes</div>
+          <div id="resumen-general-budget" style="margin-bottom:14px;"></div>
           <div id="resumen-budgets"></div>
         </div>
       </div>
@@ -500,7 +501,7 @@ input,select{font-family:inherit; min-width:0; max-width:100%;}
             <div class="field"><label>Moneda</label><select id="acc-currency"></select></div>
             <div class="field"><label>País</label><input type="text" id="acc-country" placeholder="Ej. España"></div>
             <div class="field" id="acc-credit-limit-field" style="display:none;"><label>Límite de crédito</label><input type="number" id="acc-credit-limit" step="0.01" min="0" placeholder="0,00"></div>
-            <div class="field" id="acc-card-payday-field" style="display:none;"><label>Día de pago mensual</label><input type="number" id="acc-card-payday" min="1" max="28" placeholder="Ej. 15"></div>
+            <div class="field" id="acc-card-payday-field" style="display:none;"><label>Día de pago mensual</label><input type="number" id="acc-card-payday" min="1" max="31" placeholder="Ej. 15"></div>
             <div class="field" id="acc-card-autopay-field" style="display:none;"><label>Débito automático desde <span class="muted">opcional</span></label><select id="acc-card-autopay"><option value="">Sin débito automático</option></select></div>
           </div>
           <button type="submit" class="btn-primary">Añadir cuenta</button>
@@ -1259,18 +1260,24 @@ async function generateDueInstallments(){
   }
 }
 
+function dateForDayInMonth(year, month, day){
+  const lastDay = new Date(year, month+1, 0).getDate();
+  return new Date(year, month, Math.min(day, lastDay));
+}
 function nextMonthlyOnDay(fromISO, day){
   const d = new Date(fromISO + "T00:00:00");
-  d.setMonth(d.getMonth()+1);
-  const lastDay = new Date(d.getFullYear(), d.getMonth()+1, 0).getDate();
-  d.setDate(Math.min(day, lastDay));
-  return d.toISOString().slice(0,10);
+  let month = d.getMonth()+1, year = d.getFullYear();
+  if(month>11){ month=0; year++; }
+  return dateForDayInMonth(year, month, day).toISOString().slice(0,10);
 }
 function firstCardDueDate(day, fromISO){
   const d = new Date(fromISO + "T00:00:00");
-  const lastDay = new Date(d.getFullYear(), d.getMonth()+1, 0).getDate();
-  const candidate = new Date(d.getFullYear(), d.getMonth(), Math.min(day, lastDay));
-  if(candidate < d) candidate.setMonth(candidate.getMonth()+1);
+  let candidate = dateForDayInMonth(d.getFullYear(), d.getMonth(), day);
+  if(candidate < d){
+    let month = d.getMonth()+1, year = d.getFullYear();
+    if(month>11){ month=0; year++; }
+    candidate = dateForDayInMonth(year, month, day);
+  }
   return candidate.toISOString().slice(0,10);
 }
 async function generateDueCardPayments(){
@@ -1298,6 +1305,17 @@ async function generateDueCardPayments(){
     }
     if(changed) await idb.put('accounts', a);
   }
+}
+
+function cardPendingInstallments(accountId){
+  return state.installments.filter(it=>it.accountId===accountId && it.active!==false).reduce((sum,it)=>{
+    const sched = Array.isArray(it.schedule) ? it.schedule : [];
+    let pending = 0;
+    for(let i=it.paidInstallments; i<it.totalInstallments; i++){
+      pending += (sched[i]!=null ? sched[i] : (it.amount||0));
+    }
+    return sum + pending;
+  }, 0);
 }
 
 /* ================= Balances ================= */
@@ -1476,6 +1494,7 @@ function renderResumen(){
   const budgetCats = Object.keys(state.budgets).filter(cid => state.budgets[cid] > 0);
   const budgetsEl = document.getElementById('resumen-budgets');
   budgetsEl.innerHTML = '';
+  renderGeneralBudget(monthExpenses, 'resumen-general-budget');
   if(budgetCats.length===0){
     budgetsEl.innerHTML = '<div class="empty-note">Fija límites en la pestaña Presupuestos.</div>';
   } else {
@@ -1670,9 +1689,10 @@ function renderNetWorth(){
   }).join('');
 }
 
-function renderGeneralBudget(monthExpenses){
-  const el = document.getElementById('general-budget-summary');
-  document.getElementById('general-budget-input').value = state.generalBudget || '';
+function renderGeneralBudget(monthExpenses, elId){
+  const el = document.getElementById(elId || 'general-budget-summary');
+  if(!el) return;
+  if(!elId) document.getElementById('general-budget-input').value = state.generalBudget || '';
 
   let fixedTotal = 0, variableTotal = 0;
   monthExpenses.forEach(t=>{
@@ -1686,6 +1706,7 @@ function renderGeneralBudget(monthExpenses){
   const remaining = limit - total;
 
   if(!limit){
+    if(elId){ el.innerHTML = ''; return; }
     el.innerHTML = `
       <div class="stat-sub" style="margin-bottom:10px;">Fija un límite mensual abajo para ver cuánto te queda libre.</div>
       <div class="budget-row" style="border:none; padding:0;">
@@ -1709,17 +1730,19 @@ function renderGeneralBudget(monthExpenses){
   const dailyRemaining = (freeForVariables - variableTotal) / daysRemaining;
 
   el.innerHTML = `
-    <div class="budget-top"><div class="budget-cat">Gastado este mes</div><div class="budget-nums">${fmtMoney(total)} / ${fmtMoney(limit)}</div></div>
-    <div class="budget-track"><div class="budget-fill ${over?'over':(warn?'warn':'')}" style="width:${pct}%"></div></div>
-    <div class="stat-sub" style="margin-top:8px; color:${remaining<0?'var(--over)':'var(--text-soft)'};">${remaining<0 ? 'Te pasaste por '+fmtMoney(Math.abs(remaining)) : 'Te queda '+fmtMoney(remaining)}</div>
-    <div style="display:flex; gap:20px; margin-top:12px;">
-      <div class="stat-sub">🔁 Fijos: <strong style="color:var(--text);">${fmtMoney(fixedTotal)}</strong></div>
-      <div class="stat-sub">✏️ Variables: <strong style="color:var(--text);">${fmtMoney(variableTotal)}</strong></div>
-    </div>
-    <div style="margin-top:16px; padding-top:14px; border-top:1px solid var(--rule);">
-      <div class="stat-label">Presupuesto diario libre <span class="muted" style="text-transform:none; font-weight:500;">(descontando fijos)</span></div>
-      <div class="balance-num" style="font-size:26px; margin:6px 0 2px; color:${dailyRemaining<0?'var(--over)':'var(--text)'};">${fmtMoney(dailyRemaining)}<span style="font-size:14px; color:var(--text-soft); font-weight:500;"> /día</span></div>
-      <div class="stat-sub">Para los ${daysRemaining} días que quedan del mes · si lo repartes parejo desde el día 1: ${fmtMoney(dailyBaseline)}/día</div>
+    <div${elId ? ' style="padding-bottom:14px; border-bottom:1px solid var(--rule);"' : ''}>
+      <div class="budget-top"><div class="budget-cat">${elId ? 'Presupuesto general' : 'Gastado este mes'}</div><div class="budget-nums">${fmtMoney(total)} / ${fmtMoney(limit)}</div></div>
+      <div class="budget-track"><div class="budget-fill ${over?'over':(warn?'warn':'')}" style="width:${pct}%"></div></div>
+      <div class="stat-sub" style="margin-top:8px; color:${remaining<0?'var(--over)':'var(--text-soft)'};">${remaining<0 ? 'Te pasaste por '+fmtMoney(Math.abs(remaining)) : 'Te queda '+fmtMoney(remaining)}</div>
+      <div style="display:flex; gap:20px; margin-top:12px;">
+        <div class="stat-sub">🔁 Fijos: <strong style="color:var(--text);">${fmtMoney(fixedTotal)}</strong></div>
+        <div class="stat-sub">✏️ Variables: <strong style="color:var(--text);">${fmtMoney(variableTotal)}</strong></div>
+      </div>
+      <div style="margin-top:16px; padding-top:14px; border-top:1px solid var(--rule);">
+        <div class="stat-label">Presupuesto diario libre <span class="muted" style="text-transform:none; font-weight:500;">(descontando fijos)</span></div>
+        <div class="balance-num" style="font-size:26px; margin:6px 0 2px; color:${dailyRemaining<0?'var(--over)':'var(--text)'};">${fmtMoney(dailyRemaining)}<span style="font-size:14px; color:var(--text-soft); font-weight:500;"> /día</span></div>
+        <div class="stat-sub">Para los ${daysRemaining} días que quedan del mes · si lo repartes parejo desde el día 1: ${fmtMoney(dailyBaseline)}/día</div>
+      </div>
     </div>
   `;
 }
@@ -1951,7 +1974,8 @@ function renderCuentas(){
       div.className = 'account-card' + (a.visible===false ? ' hidden-acct' : '');
       const isCard = a.type==='tarjeta_credito';
       const bal = accountBalance(a.id);
-      const used = isCard ? Math.max(0, -bal) : 0;
+      const pendingInstallments = isCard ? cardPendingInstallments(a.id) : 0;
+      const used = isCard ? Math.max(0, -bal) + pendingInstallments : 0;
       const limit = isCard ? (a.creditLimit || 0) : 0;
       const pct = limit>0 ? Math.min(100, used/limit*100) : 0;
       const over = used>limit && limit>0;
@@ -1973,7 +1997,7 @@ function renderCuentas(){
         </div>
         ${isCard && limit>0 ? `
           <div class="budget-track" style="margin-top:10px;"><div class="budget-fill ${over?'over':(warn?'warn':'')}" style="width:${pct}%"></div></div>
-          <div class="stat-sub" style="margin-top:4px;">Consumido ${fmtMoney(used, a.currency)} de ${fmtMoney(limit, a.currency)} · disponible ${fmtMoney(Math.max(0,limit-used), a.currency)}</div>
+          <div class="stat-sub" style="margin-top:4px;">Consumido ${fmtMoney(used, a.currency)} de ${fmtMoney(limit, a.currency)} · disponible ${fmtMoney(Math.max(0,limit-used), a.currency)}${pendingInstallments>0.004 ? ` <span class="muted">(incluye ${fmtMoney(pendingInstallments, a.currency)} en cuotas pendientes)</span>` : ''}</div>
         ` : ''}
         ${isCard ? `
           <div class="stat-sub" style="margin-top:4px;">${a.paymentDay ? `Pago el día ${a.paymentDay} de cada mes` : 'Sin día de pago configurado'}${a.paymentDay ? (a.autopayAccountId ? ' · Débito automático desde '+escapeHtml(getAccount(a.autopayAccountId)?.name||'cuenta eliminada') : ' · Sin débito automático') : ''}</div>
@@ -1982,7 +2006,7 @@ function renderCuentas(){
           <div class="form-grid">
             <div class="field"><label>Corregir saldo</label><input type="number" step="0.01" data-acct-edit-input="${a.id}" value="${accountBalance(a.id).toFixed(2)}"></div>
             ${isCard ? `
-              <div class="field"><label>Día de pago mensual</label><input type="number" min="1" max="28" data-acct-edit-payday="${a.id}" value="${a.paymentDay||''}" placeholder="Ej. 15"></div>
+              <div class="field"><label>Día de pago mensual</label><input type="number" min="1" max="31" data-acct-edit-payday="${a.id}" value="${a.paymentDay||''}" placeholder="Ej. 15"></div>
               <div class="field"><label>Débito automático desde</label><select data-acct-edit-autopay="${a.id}"><option value="">Sin débito automático</option>${state.accounts.filter(x=>x.id!==a.id && x.type!=='tarjeta_credito').map(x=>`<option value="${x.id}" ${x.id===a.autopayAccountId?'selected':''}>${escapeHtml(x.name)} (${x.currency})</option>`).join('')}</select></div>
             ` : ''}
           </div>
@@ -3451,13 +3475,14 @@ function setupAccounts(){
     const type = document.getElementById('acc-type').value;
     const isCard = type==='tarjeta_credito';
     const paydayVal = parseInt(document.getElementById('acc-card-payday').value, 10);
+    if(isCard && document.getElementById('acc-card-payday').value && (isNaN(paydayVal) || paydayVal<1 || paydayVal>31)){ toast('El día de pago debe estar entre 1 y 31'); return; }
     const autopayVal = document.getElementById('acc-card-autopay').value;
     await idb.put('accounts', {
       name, type,
       currency: document.getElementById('acc-currency').value,
       country: document.getElementById('acc-country').value.trim(),
       creditLimit: isCard ? (parseFloat(document.getElementById('acc-credit-limit').value) || 0) : null,
-      paymentDay: isCard && paydayVal>=1 && paydayVal<=28 ? paydayVal : null,
+      paymentDay: isCard && paydayVal>=1 && paydayVal<=31 ? paydayVal : null,
       autopayAccountId: isCard && autopayVal ? Number(autopayVal) : null,
       lastAutopayGenerated: null,
       visible: true
@@ -3542,8 +3567,9 @@ function setupAccounts(){
       if(paydayInput){
         const autopayInput = document.querySelector(`[data-acct-edit-autopay="${id}"]`);
         const paydayVal = parseInt(paydayInput.value, 10);
+        if(paydayInput.value && (isNaN(paydayVal) || paydayVal<1 || paydayVal>31)){ toast('El día de pago debe estar entre 1 y 31'); return; }
         const autopayVal = autopayInput ? autopayInput.value : '';
-        const newPayday = paydayVal>=1 && paydayVal<=28 ? paydayVal : null;
+        const newPayday = paydayVal>=1 && paydayVal<=31 ? paydayVal : null;
         const newAutopay = autopayVal ? Number(autopayVal) : null;
         if(newPayday !== (acc.paymentDay||null) || newAutopay !== (acc.autopayAccountId||null)){
           await idb.put('accounts', {...acc, paymentDay:newPayday, autopayAccountId:newAutopay});
