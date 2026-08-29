@@ -735,6 +735,13 @@ input,select{font-family:inherit; min-width:0; max-width:100%;}
           </div>
           <div class="field"><label>Primera fecha</label><input type="date" id="rec-date"></div>
           <div class="field"><label>Deuda relacionada <span class="muted">opcional</span></label><select id="rec-debt"></select></div>
+          <div class="field"><label>Tipo de movimiento con la deuda</label>
+            <div class="type-toggle" id="rec-debt-mode-toggle" style="max-width:280px;">
+              <button type="button" class="type-btn active" data-debtmode="payment">Pago/abono</button>
+              <button type="button" class="type-btn" data-debtmode="loan">Préstamo nuevo (suma)</button>
+            </div>
+          </div>
+          <div class="field" id="rec-debt-newperson-field" style="display:none;"><label>Nombre de la persona</label><input type="text" id="rec-debt-newperson" placeholder="Nombre"></div>
           <div class="field"><label>Persona <span class="muted">para transferencias, opcional</span></label><input type="text" id="rec-person" placeholder="Ej. Carlos"></div>
           <div class="field"><label>Nota</label><input type="text" id="rec-note" placeholder="Ej. Alquiler, Netflix..."></div>
         </div>
@@ -962,6 +969,7 @@ let state = {
   qkType:'expense',
   txDebtMode:'payment',
   qkDebtMode:'payment',
+  recDebtMode:'payment',
   goals:[], recurring:[], reminders:[], debts:[], installments:[], shortcuts:[],
   lastBackupDate:null, backupReminderShown:false, editingTxId:null, editingTransferId:null, accentColor:'#A5842E', darkMode:false, textScale:100, iconPickerTarget:null, generalBudget:0,
   resumenPeriod:{mode:'month', ref:todayISO()},
@@ -1198,6 +1206,16 @@ function installmentAmountFor(it, index){
   if(Array.isArray(it.schedule) && it.schedule[index]!=null) return it.schedule[index];
   return it.amount || 0;
 }
+function installmentTotals(it){
+  const sched = Array.isArray(it.schedule) ? it.schedule : [];
+  let paid = 0, total = 0;
+  for(let i=0; i<it.totalInstallments; i++){
+    const amt = sched[i]!=null ? sched[i] : (it.amount||0);
+    total += amt;
+    if(i < it.paidInstallments) paid += amt;
+  }
+  return {paid, total, remaining: Math.max(0, total-paid)};
+}
 function normalizeSchedule(schedule, totalInstallments, fallbackAmount){
   const sched = Array.isArray(schedule) ? schedule.slice(0, totalInstallments) : [];
   while(sched.length < totalInstallments){
@@ -1225,8 +1243,8 @@ async function generateDueRecurring(){
       if(r.isTransfer){
         await idb.put('transfers', {fromAccountId:r.fromAccountId, toAccountId:r.toAccountId, fromAmount:r.fromAmount, toAmount:r.toAmount, date:next, note:(r.note ? r.note+' · ' : '')+'Recurrente'});
       } else {
-        await idb.put('transactions', {accountId:r.accountId, kind:r.kind, amount:r.amount, categoryId:r.categoryId, subcategory:r.subcategory||'', date:next, note:(r.note ? r.note+' · ' : '')+'Recurrente', debtId:r.debtId||null, source:'recurring'});
-        if(r.debtId) await applyDebtPayment(r.debtId, r.amount);
+        await idb.put('transactions', {accountId:r.accountId, kind:r.kind, amount:r.amount, categoryId:r.categoryId, subcategory:r.subcategory||'', date:next, note:(r.note ? r.note+' · ' : '')+'Recurrente', debtId:r.debtId||null, debtEffect:r.debtId?(r.debtEffect||'payment'):null, source:'recurring'});
+        if(r.debtId) await applyDebtEffect(r.debtId, r.debtEffect||'payment', r.amount);
       }
       r.lastGenerated = next;
       next = nextRecurringDate(next, r.frequency);
@@ -1494,7 +1512,7 @@ function renderResumen(){
   const budgetCats = Object.keys(state.budgets).filter(cid => state.budgets[cid] > 0);
   const budgetsEl = document.getElementById('resumen-budgets');
   budgetsEl.innerHTML = '';
-  renderGeneralBudget(monthExpenses, 'resumen-general-budget');
+  renderGeneralBudget(monthExpenses, 'resumen-general-budget', computeMonthFixedProjection(mStart, mEnd));
   if(budgetCats.length===0){
     budgetsEl.innerHTML = '<div class="empty-note">Fija límites en la pestaña Presupuestos.</div>';
   } else {
@@ -1628,6 +1646,17 @@ function projectCardPaymentOccurrences(a, fromDate, toDate){
   }
   return out;
 }
+function computeMonthFixedProjection(monthStart, monthEnd){
+  let total = 0;
+  state.recurring.forEach(r=>{
+    if(r.isTransfer || r.kind!=='expense') return;
+    projectRecurringOccurrences(r, monthStart, monthEnd).forEach(o=>{ total += toBase(o.amount, o.currency); });
+  });
+  state.installments.forEach(it=>{
+    projectInstallmentOccurrences(it, monthStart, monthEnd).forEach(o=>{ total += toBase(o.amount, o.currency); });
+  });
+  return total;
+}
 function computeCashflowProjection(days){
   const today = todayISO();
   const endD = new Date(today+"T00:00:00"); endD.setDate(endD.getDate()+days);
@@ -1689,7 +1718,7 @@ function renderNetWorth(){
   }).join('');
 }
 
-function renderGeneralBudget(monthExpenses, elId){
+function renderGeneralBudget(monthExpenses, elId, pendingFixed){
   const el = document.getElementById(elId || 'general-budget-summary');
   if(!el) return;
   if(!elId) document.getElementById('general-budget-input').value = state.generalBudget || '';
@@ -1701,6 +1730,8 @@ function renderGeneralBudget(monthExpenses, elId){
     if(t.source==='recurring' || t.source==='installment') fixedTotal += amt;
     else variableTotal += amt;
   });
+  const pending = pendingFixed || 0;
+  fixedTotal += pending;
   const total = fixedTotal + variableTotal;
   const limit = state.generalBudget || 0;
   const remaining = limit - total;
@@ -1735,7 +1766,7 @@ function renderGeneralBudget(monthExpenses, elId){
       <div class="budget-track"><div class="budget-fill ${over?'over':(warn?'warn':'')}" style="width:${pct}%"></div></div>
       <div class="stat-sub" style="margin-top:8px; color:${remaining<0?'var(--over)':'var(--text-soft)'};">${remaining<0 ? 'Te pasaste por '+fmtMoney(Math.abs(remaining)) : 'Te queda '+fmtMoney(remaining)}</div>
       <div style="display:flex; gap:20px; margin-top:12px;">
-        <div class="stat-sub">🔁 Fijos: <strong style="color:var(--text);">${fmtMoney(fixedTotal)}</strong></div>
+        <div class="stat-sub">🔁 Fijos: <strong style="color:var(--text);">${fmtMoney(fixedTotal)}</strong>${pending>0.004 ? ` <span class="muted">(incluye ${fmtMoney(pending)} aún no facturados)</span>` : ''}</div>
         <div class="stat-sub">✏️ Variables: <strong style="color:var(--text);">${fmtMoney(variableTotal)}</strong></div>
       </div>
       <div style="margin-top:16px; padding-top:14px; border-top:1px solid var(--rule);">
@@ -2054,7 +2085,7 @@ function renderPresupuestos(){
   const spendByCat = {};
   monthExpenses.forEach(t=>{ const acc=getAccount(t.accountId); const amt=toBase(t.amount, acc?acc.currency:state.baseCurrency); spendByCat[t.categoryId]=(spendByCat[t.categoryId]||0)+amt; });
 
-  renderGeneralBudget(monthExpenses);
+  renderGeneralBudget(monthExpenses, undefined, computeMonthFixedProjection(mStart, mEnd));
 
   const expenseCats = sortedCategories('expense');
 
@@ -2203,7 +2234,7 @@ function renderMas(){
       div.innerHTML = `
         <div class="acct-main-row">
         <div>
-          <div class="acct-name">${escapeHtml(r.note || (cat?cat.name:'Recurrente'))}</div>
+          <div class="acct-name">${escapeHtml(r.note || (cat?cat.name:'Recurrente'))}${r.debtId && r.debtEffect==='loan' ? ' <span class="muted" style="font-weight:normal;">(préstamo nuevo)</span>' : ''}</div>
           <div class="acct-meta">${freqLabel} · ${cat?catIcon(cat)+' '+escapeHtml(cat.name):''} · ${acc?escapeHtml(acc.name):''}</div>
         </div>
         <div class="acct-right">
@@ -2219,7 +2250,8 @@ function renderMas(){
             <div class="field"><label>Importe</label><input type="number" step="0.01" min="0" data-rec-edit-amount="${r.id}" value="${r.amount}"></div>
             <div class="field"><label>Categoría</label><select data-rec-edit-category="${r.id}">${sortedCategories(r.kind).map(c=>`<option value="${c.id}" ${c.id===r.categoryId?'selected':''}>${catIcon(c)} ${escapeHtml(c.name)}</option>`).join('')}</select></div>
             <div class="field"><label>Frecuencia</label><select data-rec-edit-frequency="${r.id}">${['weekly','monthly','yearly'].map(f=>`<option value="${f}" ${f===r.frequency?'selected':''}>${({weekly:'Semanal',monthly:'Mensual',yearly:'Anual'})[f]}</option>`).join('')}</select></div>
-            <div class="field"><label>Deuda relacionada</label><select data-rec-edit-debt="${r.id}"><option value="">Ninguna</option>${state.debts.filter(d=>d.direction===(r.kind==='income'?'me_deben':'debo')).map(d=>`<option value="${d.id}" ${d.id===r.debtId?'selected':''}>${escapeHtml(d.person)} — ${fmtMoney(d.amount)}</option>`).join('')}</select></div>
+            <div class="field"><label>Tipo con la deuda</label><select data-rec-edit-debtmode="${r.id}"><option value="payment" ${r.debtEffect!=='loan'?'selected':''}>Pago/abono</option><option value="loan" ${r.debtEffect==='loan'?'selected':''}>Préstamo nuevo (suma)</option></select></div>
+            <div class="field"><label>Deuda relacionada</label><select data-rec-edit-debt="${r.id}"><option value="">Ninguna</option>${(r.debtEffect==='loan' ? debtsForLoanKind(r.kind) : debtsForKind(r.kind)).map(d=>`<option value="${d.id}" ${d.id===r.debtId?'selected':''}>${escapeHtml(d.person)} — ${fmtMoney(d.amount)}</option>`).join('')}</select></div>
             <div class="field"><label>Persona</label><input type="text" data-rec-edit-person="${r.id}" value="${escapeHtml(r.person||'')}"></div>
             <div class="field" style="grid-column:1/-1;"><label>Nota</label><input type="text" data-rec-edit-note="${r.id}" value="${escapeHtml(r.note||'')}"></div>
           </div>
@@ -2330,6 +2362,8 @@ function renderMas(){
       const acc = getAccount(it.accountId);
       const pct = it.totalInstallments>0 ? Math.min(100, it.paidInstallments/it.totalInstallments*100) : 0;
       const nextDate = it.paidInstallments < it.totalInstallments ? (it.lastGenerated ? nextRecurringDate(it.lastGenerated,'monthly') : it.startDate) : null;
+      const totals = installmentTotals(it);
+      const curr = acc?acc.currency:state.baseCurrency;
       const div = document.createElement('div');
       div.className = 'budget-row';
       div.innerHTML = `
@@ -2338,8 +2372,9 @@ function renderMas(){
           <div class="budget-nums">Cuota ${it.paidInstallments} / ${it.totalInstallments}</div>
         </div>
         <div class="budget-track"><div class="budget-fill" style="width:${pct}%"></div></div>
+        <div class="stat-sub" style="margin-top:6px;">Pagado ${fmtMoney(totals.paid, curr)} de ${fmtMoney(totals.total, curr)} · Adeudado ${fmtMoney(totals.remaining, curr)}</div>
         <div style="display:flex; justify-content:space-between; align-items:center; margin-top:8px;">
-          <div class="stat-sub">${it.paidInstallments>=it.totalInstallments ? '✔ Pagada por completo' : (nextDate ? `Próximo pago: ${fmtDate(nextDate)} · ${fmtMoney(installmentAmountFor(it, it.paidInstallments), acc?acc.currency:state.baseCurrency)}` : '')}</div>
+          <div class="stat-sub">${it.paidInstallments>=it.totalInstallments ? '✔ Pagada por completo' : (nextDate ? `Próximo pago: ${fmtDate(nextDate)} · ${fmtMoney(installmentAmountFor(it, it.paidInstallments), curr)}` : '')}</div>
           <div style="display:flex; gap:8px;">
             <button class="btn-secondary btn-sm" data-inst-edit-toggle="${it.id}">✎ Editar</button>
             <button class="btn-secondary btn-sm btn-danger" data-del-installment="${it.id}">Eliminar</button>
@@ -2610,11 +2645,38 @@ function setupRecurring(){
       document.getElementById('rec-fields-transfer').style.display = isTransfer ? 'block' : 'none';
       if(!isTransfer){
         populateCategorySelect(document.getElementById('rec-category'), recType);
-        populateDebtSelect(document.getElementById('rec-debt'), recType);
+        populateDebtSelect(document.getElementById('rec-debt'), recType, state.recDebtMode);
       }
     });
   });
   populateCategorySelect(document.getElementById('rec-category'), recType);
+
+  document.getElementById('rec-debt-mode-toggle').querySelectorAll('.type-btn').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      document.querySelectorAll('#rec-debt-mode-toggle .type-btn').forEach(b=>b.classList.remove('active'));
+      btn.classList.add('active');
+      state.recDebtMode = btn.dataset.debtmode;
+      populateDebtSelect(document.getElementById('rec-debt'), recType, state.recDebtMode);
+      document.getElementById('rec-debt-newperson-field').style.display = 'none';
+      document.getElementById('rec-debt-newperson').value = '';
+    });
+  });
+  document.getElementById('rec-debt').addEventListener('change', (e)=>{
+    document.getElementById('rec-debt-newperson-field').style.display = e.target.value==='__new__' ? 'block' : 'none';
+  });
+
+  document.addEventListener('change', (e)=>{
+    const modeSel = e.target.closest('[data-rec-edit-debtmode]');
+    if(modeSel){
+      const id = modeSel.dataset.recEditDebtmode;
+      const r = state.recurring.find(x=>x.id===Number(id));
+      if(!r) return;
+      const mode = modeSel.value;
+      const debtSel = document.querySelector(`[data-rec-edit-debt="${id}"]`);
+      const debts = mode==='loan' ? debtsForLoanKind(r.kind) : debtsForKind(r.kind);
+      debtSel.innerHTML = '<option value="">Ninguna</option>' + debts.map(d=>`<option value="${d.id}">${escapeHtml(d.person)} — ${fmtMoney(d.amount)}</option>`).join('');
+    }
+  });
 
   document.getElementById('rec-tr-from').addEventListener('change', updateRecTransferSuggestion);
   document.getElementById('rec-tr-to').addEventListener('change', updateRecTransferSuggestion);
@@ -2648,6 +2710,11 @@ function setupRecurring(){
       const startDate = document.getElementById('rec-date').value;
       if(!startDate) { toast('Elige una fecha de inicio'); return; }
       const debtIdVal = document.getElementById('rec-debt').value;
+      if(debtIdVal==='__new__' && !document.getElementById('rec-debt-newperson').value.trim()){ toast('Escribe el nombre de la persona'); return; }
+      let resolvedDebtId = debtIdVal ? Number(debtIdVal) : null;
+      if(debtIdVal==='__new__'){
+        resolvedDebtId = await findOrCreateDebtFor(document.getElementById('rec-debt-newperson').value, loanDirectionForKind(recType));
+      }
       await idb.put('recurring', {
         accountId: Number(document.getElementById('rec-account').value),
         kind: recType,
@@ -2659,10 +2726,12 @@ function setupRecurring(){
         lastGenerated: null,
         note: document.getElementById('rec-note').value.trim(),
         person: document.getElementById('rec-person').value.trim(),
-        debtId: debtIdVal ? Number(debtIdVal) : null,
+        debtId: resolvedDebtId,
+        debtEffect: resolvedDebtId ? state.recDebtMode : null,
         active: true
       });
       document.getElementById('rec-amount').value=''; document.getElementById('rec-note').value=''; document.getElementById('rec-person').value='';
+      document.getElementById('rec-debt-newperson').value=''; document.getElementById('rec-debt-newperson-field').style.display='none';
     }
 
     await loadAll();
@@ -2710,8 +2779,9 @@ function setupRecurring(){
       const note = document.querySelector(`[data-rec-edit-note="${id}"]`).value.trim();
       const person = document.querySelector(`[data-rec-edit-person="${id}"]`).value.trim();
       const debtIdVal = document.querySelector(`[data-rec-edit-debt="${id}"]`).value;
+      const debtEffect = document.querySelector(`[data-rec-edit-debtmode="${id}"]`).value;
       if(!amount || amount<=0){ toast('Introduce un importe válido'); return; }
-      await idb.put('recurring', {...r, accountId, amount, categoryId, frequency, note, person, debtId: debtIdVal ? Number(debtIdVal) : null});
+      await idb.put('recurring', {...r, accountId, amount, categoryId, frequency, note, person, debtId: debtIdVal ? Number(debtIdVal) : null, debtEffect: debtIdVal ? debtEffect : null});
       await loadAll(); renderAll();
       toast('Recurrente actualizado');
       return;
