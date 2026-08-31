@@ -503,6 +503,7 @@ input,select{font-family:inherit; min-width:0; max-width:100%;}
             <div class="field"><label>Moneda</label><select id="acc-currency"></select></div>
             <div class="field"><label>País</label><input type="text" id="acc-country" placeholder="Ej. España"></div>
             <div class="field" id="acc-credit-limit-field" style="display:none;"><label>Límite de crédito</label><input type="number" id="acc-credit-limit" step="0.01" min="0" placeholder="0,00"></div>
+            <div class="field" id="acc-card-cutoff-field" style="display:none;"><label>Día de corte <span class="muted">opcional, si es distinto al de pago</span></label><input type="number" id="acc-card-cutoff" min="1" max="31" placeholder="Ej. 15"></div>
             <div class="field" id="acc-card-payday-field" style="display:none;"><label>Día de pago mensual</label><input type="number" id="acc-card-payday" min="1" max="31" placeholder="Ej. 15"></div>
             <div class="field" id="acc-card-autopay-field" style="display:none;"><label>Débito automático desde <span class="muted">opcional</span></label><select id="acc-card-autopay"><option value="">Sin débito automático</option></select></div>
           </div>
@@ -1300,26 +1301,53 @@ function firstCardDueDate(day, fromISO){
   }
   return candidate.toISOString().slice(0,10);
 }
+function cutoffDayFor(a){ return a.cutoffDay || a.paymentDay; }
+function paymentDateForCutoff(cutoffISO, paymentDay){
+  return firstCardDueDate(paymentDay, cutoffISO);
+}
+function cardNextCycle(a, fromISO){
+  const cutoffDay = cutoffDayFor(a);
+  let cutoff = a.lastAutopayGenerated
+    ? nextMonthlyOnDay(a.lastAutopayGenerated, cutoffDay)
+    : (()=>{ const td=new Date(fromISO+"T00:00:00"); return dateForDayInMonth(td.getFullYear(), td.getMonth(), cutoffDay).toISOString().slice(0,10); })();
+  let paymentDate = paymentDateForCutoff(cutoff, a.paymentDay);
+  let iterations = 0;
+  while(paymentDate < fromISO && iterations < 36){
+    cutoff = nextMonthlyOnDay(cutoff, cutoffDay);
+    paymentDate = paymentDateForCutoff(cutoff, a.paymentDay);
+    iterations++;
+  }
+  return {cutoff, paymentDate};
+}
 async function generateDueCardPayments(){
   const today = todayISO();
   for(const a of state.accounts){
     if(a.type !== 'tarjeta_credito' || !a.paymentDay || !a.autopayAccountId) continue;
     const fromAcc = getAccount(a.autopayAccountId);
     if(!fromAcc) continue;
-    let next = a.lastAutopayGenerated ? nextMonthlyOnDay(a.lastAutopayGenerated, a.paymentDay) : firstCardDueDate(a.paymentDay, today);
+    const cutoffDay = cutoffDayFor(a);
+    let nextCutoff;
+    if(a.lastAutopayGenerated){
+      nextCutoff = nextMonthlyOnDay(a.lastAutopayGenerated, cutoffDay);
+    } else {
+      const td = new Date(today + "T00:00:00");
+      nextCutoff = dateForDayInMonth(td.getFullYear(), td.getMonth(), cutoffDay).toISOString().slice(0,10);
+    }
     let iterations = 0;
     let changed = false;
-    while(next && next <= today && iterations < 36){
-      const used = Math.max(0, -accountBalance(a.id));
+    while(iterations < 36){
+      const paymentDate = paymentDateForCutoff(nextCutoff, a.paymentDay);
+      if(paymentDate > today) break;
+      const used = Math.max(0, -accountBalanceAsOf(a.id, nextCutoff));
       if(used > 0.004){
         const crossRate = effectiveRate(fromAcc.currency) / effectiveRate(a.currency);
         const fromAmount = Math.round((used / crossRate) * 100) / 100;
-        const transferRecord = {fromAccountId:a.autopayAccountId, toAccountId:a.id, fromAmount, toAmount:used, date:next, note:'Pago automático tarjeta · '+a.name};
+        const transferRecord = {fromAccountId:a.autopayAccountId, toAccountId:a.id, fromAmount, toAmount:used, date:paymentDate, note:'Pago automático tarjeta · '+a.name};
         await idb.put('transfers', transferRecord);
         state.transfers.push(transferRecord);
       }
-      a.lastAutopayGenerated = next;
-      next = nextMonthlyOnDay(next, a.paymentDay);
+      a.lastAutopayGenerated = nextCutoff;
+      nextCutoff = nextMonthlyOnDay(nextCutoff, cutoffDay);
       changed = true;
       iterations++;
     }
@@ -1582,9 +1610,10 @@ function renderPaymentAlerts(){
   const alerts = [];
   state.accounts.forEach(a=>{
     if(a.type!=='tarjeta_credito' || !a.paymentDay) return;
-    const used = Math.max(0, -accountBalance(a.id));
+    const {cutoff, paymentDate} = cardNextCycle(a, today);
+    const used = Math.max(0, -accountBalanceAsOf(a.id, cutoff));
     if(used <= 0.004) return;
-    const dueDate = firstCardDueDate(a.paymentDay, today);
+    const dueDate = paymentDate;
     const daysUntil = Math.round((new Date(dueDate+"T00:00:00") - new Date(today+"T00:00:00")) / 86400000);
     if(daysUntil >= 0 && daysUntil <= 3){
       alerts.push({account:a, used, dueDate, daysUntil, autopayAcc: a.autopayAccountId ? getAccount(a.autopayAccountId) : null});
@@ -1639,12 +1668,12 @@ function projectInstallmentOccurrences(it, fromDate, toDate){
 function projectCardPaymentOccurrences(a, fromDate, toDate){
   const out = [];
   if(a.type!=='tarjeta_credito' || !a.paymentDay) return out;
-  const used = Math.max(0, -accountBalance(a.id));
+  const {cutoff, paymentDate} = cardNextCycle(a, fromDate);
+  const used = Math.max(0, -accountBalanceAsOf(a.id, cutoff));
   if(used <= 0.004) return out;
-  const next = a.lastAutopayGenerated ? nextMonthlyOnDay(a.lastAutopayGenerated, a.paymentDay) : firstCardDueDate(a.paymentDay, fromDate);
-  if(next >= fromDate && next <= toDate){
+  if(paymentDate >= fromDate && paymentDate <= toDate){
     const label = '💳 ' + a.name + (a.autopayAccountId ? ' (pago automático)' : ' (pendiente de pagar)');
-    out.push({date:next, label, amount:used, currency:a.currency, kind:'expense'});
+    out.push({date:paymentDate, label, amount:used, currency:a.currency, kind:'expense'});
   }
   return out;
 }
@@ -2033,12 +2062,13 @@ function renderCuentas(){
           <div class="stat-sub" style="margin-top:4px;">Consumido ${fmtMoney(used, a.currency)} de ${fmtMoney(limit, a.currency)} · disponible ${fmtMoney(Math.max(0,limit-used), a.currency)}${pendingInstallments>0.004 ? ` <span class="muted">(incluye ${fmtMoney(pendingInstallments, a.currency)} en cuotas pendientes)</span>` : ''}</div>
         ` : ''}
         ${isCard ? `
-          <div class="stat-sub" style="margin-top:4px;">${a.paymentDay ? `Pago el día ${a.paymentDay} de cada mes` : 'Sin día de pago configurado'}${a.paymentDay ? (a.autopayAccountId ? ' · Débito automático desde '+escapeHtml(getAccount(a.autopayAccountId)?.name||'cuenta eliminada') : ' · Sin débito automático') : ''}</div>
+          <div class="stat-sub" style="margin-top:4px;">${a.paymentDay ? (cutoffDayFor(a)!==a.paymentDay ? `Corte el día ${cutoffDayFor(a)}, pago el día ${a.paymentDay}` : `Pago el día ${a.paymentDay} de cada mes`) : 'Sin día de pago configurado'}${a.paymentDay ? (a.autopayAccountId ? ' · Débito automático desde '+escapeHtml(getAccount(a.autopayAccountId)?.name||'cuenta eliminada') : ' · Sin débito automático') : ''}</div>
         ` : ''}
         <div class="acct-edit-row" id="acct-edit-${a.id}" style="display:none; flex-direction:column; gap:10px;">
           <div class="form-grid">
             <div class="field"><label>Corregir saldo</label><input type="number" step="0.01" data-acct-edit-input="${a.id}" value="${accountBalance(a.id).toFixed(2)}"></div>
             ${isCard ? `
+              <div class="field"><label>Día de corte <span class="muted">opcional</span></label><input type="number" min="1" max="31" data-acct-edit-cutoff="${a.id}" value="${a.cutoffDay||''}" placeholder="Ej. 15"></div>
               <div class="field"><label>Día de pago mensual</label><input type="number" min="1" max="31" data-acct-edit-payday="${a.id}" value="${a.paymentDay||''}" placeholder="Ej. 15"></div>
               <div class="field"><label>Débito automático desde</label><select data-acct-edit-autopay="${a.id}"><option value="">Sin débito automático</option>${state.accounts.filter(x=>x.id!==a.id && x.type!=='tarjeta_credito').map(x=>`<option value="${x.id}" ${x.id===a.autopayAccountId?'selected':''}>${escapeHtml(x.name)} (${x.currency})</option>`).join('')}</select></div>
             ` : ''}
@@ -3536,6 +3566,7 @@ function setupAccounts(){
   document.getElementById('acc-type').addEventListener('change', (e)=>{
     const isCard = e.target.value==='tarjeta_credito';
     document.getElementById('acc-credit-limit-field').style.display = isCard ? 'flex' : 'none';
+    document.getElementById('acc-card-cutoff-field').style.display = isCard ? 'flex' : 'none';
     document.getElementById('acc-card-payday-field').style.display = isCard ? 'flex' : 'none';
     document.getElementById('acc-card-autopay-field').style.display = isCard ? 'flex' : 'none';
   });
@@ -3548,6 +3579,8 @@ function setupAccounts(){
     const isCard = type==='tarjeta_credito';
     const paydayVal = parseInt(document.getElementById('acc-card-payday').value, 10);
     if(isCard && document.getElementById('acc-card-payday').value && (isNaN(paydayVal) || paydayVal<1 || paydayVal>31)){ toast('El día de pago debe estar entre 1 y 31'); return; }
+    const cutoffVal = parseInt(document.getElementById('acc-card-cutoff').value, 10);
+    if(isCard && document.getElementById('acc-card-cutoff').value && (isNaN(cutoffVal) || cutoffVal<1 || cutoffVal>31)){ toast('El día de corte debe estar entre 1 y 31'); return; }
     const autopayVal = document.getElementById('acc-card-autopay').value;
     await idb.put('accounts', {
       name, type,
@@ -3555,6 +3588,7 @@ function setupAccounts(){
       country: document.getElementById('acc-country').value.trim(),
       creditLimit: isCard ? (parseFloat(document.getElementById('acc-credit-limit').value) || 0) : null,
       paymentDay: isCard && paydayVal>=1 && paydayVal<=31 ? paydayVal : null,
+      cutoffDay: isCard && cutoffVal>=1 && cutoffVal<=31 ? cutoffVal : null,
       autopayAccountId: isCard && autopayVal ? Number(autopayVal) : null,
       lastAutopayGenerated: null,
       visible: true
@@ -3562,7 +3596,7 @@ function setupAccounts(){
     await loadAll();
     await generateDueCardPayments();
     await loadAll(); renderAll();
-    document.getElementById('acc-name').value=''; document.getElementById('acc-country').value=''; document.getElementById('acc-credit-limit').value=''; document.getElementById('acc-card-payday').value=''; document.getElementById('acc-card-autopay').value='';
+    document.getElementById('acc-name').value=''; document.getElementById('acc-country').value=''; document.getElementById('acc-credit-limit').value=''; document.getElementById('acc-card-cutoff').value=''; document.getElementById('acc-card-payday').value=''; document.getElementById('acc-card-autopay').value='';
     document.getElementById('acc-credit-limit-field').style.display = 'none';
     document.getElementById('acc-card-payday-field').style.display = 'none';
     document.getElementById('acc-card-autopay-field').style.display = 'none';
@@ -3638,13 +3672,18 @@ function setupAccounts(){
       let cardChanged = false;
       if(paydayInput){
         const autopayInput = document.querySelector(`[data-acct-edit-autopay="${id}"]`);
+        const cutoffInput = document.querySelector(`[data-acct-edit-cutoff="${id}"]`);
         const paydayVal = parseInt(paydayInput.value, 10);
         if(paydayInput.value && (isNaN(paydayVal) || paydayVal<1 || paydayVal>31)){ toast('El día de pago debe estar entre 1 y 31'); return; }
+        const cutoffVal = cutoffInput ? parseInt(cutoffInput.value, 10) : NaN;
+        if(cutoffInput && cutoffInput.value && (isNaN(cutoffVal) || cutoffVal<1 || cutoffVal>31)){ toast('El día de corte debe estar entre 1 y 31'); return; }
         const autopayVal = autopayInput ? autopayInput.value : '';
         const newPayday = paydayVal>=1 && paydayVal<=31 ? paydayVal : null;
+        const newCutoff = cutoffVal>=1 && cutoffVal<=31 ? cutoffVal : null;
         const newAutopay = autopayVal ? Number(autopayVal) : null;
-        if(newPayday !== (acc.paymentDay||null) || newAutopay !== (acc.autopayAccountId||null)){
-          await idb.put('accounts', {...acc, paymentDay:newPayday, autopayAccountId:newAutopay});
+        if(newPayday !== (acc.paymentDay||null) || newCutoff !== (acc.cutoffDay||null) || newAutopay !== (acc.autopayAccountId||null)){
+          const cutoffChanged = newCutoff !== (acc.cutoffDay||null);
+          await idb.put('accounts', {...acc, paymentDay:newPayday, cutoffDay:newCutoff, autopayAccountId:newAutopay, lastAutopayGenerated: cutoffChanged ? null : acc.lastAutopayGenerated});
           cardChanged = true;
         }
       }
