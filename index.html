@@ -979,7 +979,9 @@ let state = {
   movPeriod:{mode:'month', ref:todayISO()},
 };
 
-function todayISO(){ return new Date().toISOString().slice(0,10); }
+function todayISO(){ return localISO(new Date()); }
+function pad2(n){ return String(n).padStart(2,'0'); }
+function localISO(d){ return d.getFullYear()+'-'+pad2(d.getMonth()+1)+'-'+pad2(d.getDate()); }
 
 function toast(msg, actionLabel, actionFn, duration){
   const el = document.getElementById('toast');
@@ -1232,7 +1234,7 @@ function nextRecurringDate(dateStr, freq){
   if(freq==='weekly') d.setDate(d.getDate()+7);
   else if(freq==='yearly') d.setFullYear(d.getFullYear()+1);
   else d.setMonth(d.getMonth()+1);
-  return d.toISOString().slice(0,10);
+  return localISO(d);
 }
 
 async function generateDueRecurring(){
@@ -1289,7 +1291,7 @@ function nextMonthlyOnDay(fromISO, day){
   const d = new Date(fromISO + "T00:00:00");
   let month = d.getMonth()+1, year = d.getFullYear();
   if(month>11){ month=0; year++; }
-  return dateForDayInMonth(year, month, day).toISOString().slice(0,10);
+  return localISO(dateForDayInMonth(year, month, day));
 }
 function firstCardDueDate(day, fromISO){
   const d = new Date(fromISO + "T00:00:00");
@@ -1299,7 +1301,7 @@ function firstCardDueDate(day, fromISO){
     if(month>11){ month=0; year++; }
     candidate = dateForDayInMonth(year, month, day);
   }
-  return candidate.toISOString().slice(0,10);
+  return localISO(candidate);
 }
 function cutoffDayFor(a){ return a.cutoffDay || a.paymentDay; }
 function paymentDateForCutoff(cutoffISO, paymentDay){
@@ -1309,7 +1311,7 @@ function cardNextCycle(a, fromISO){
   const cutoffDay = cutoffDayFor(a);
   let cutoff = a.lastAutopayGenerated
     ? nextMonthlyOnDay(a.lastAutopayGenerated, cutoffDay)
-    : (()=>{ const td=new Date(fromISO+"T00:00:00"); return dateForDayInMonth(td.getFullYear(), td.getMonth(), cutoffDay).toISOString().slice(0,10); })();
+    : (()=>{ const td=new Date(fromISO+"T00:00:00"); return localISO(dateForDayInMonth(td.getFullYear(), td.getMonth(), cutoffDay)); })();
   let paymentDate = paymentDateForCutoff(cutoff, a.paymentDay);
   let iterations = 0;
   while(paymentDate < fromISO && iterations < 36){
@@ -1331,7 +1333,7 @@ async function generateDueCardPayments(){
       nextCutoff = nextMonthlyOnDay(a.lastAutopayGenerated, cutoffDay);
     } else {
       const td = new Date(today + "T00:00:00");
-      nextCutoff = dateForDayInMonth(td.getFullYear(), td.getMonth(), cutoffDay).toISOString().slice(0,10);
+      nextCutoff = localISO(dateForDayInMonth(td.getFullYear(), td.getMonth(), cutoffDay));
     }
     let iterations = 0;
     let changed = false;
@@ -1441,7 +1443,7 @@ function startOfMonth(d){ return new Date(d.getFullYear(), d.getMonth(), 1); }
 function endOfMonth(d){ return new Date(d.getFullYear(), d.getMonth()+1, 0, 23,59,59,999); }
 function startOfYear(d){ return new Date(d.getFullYear(), 0, 1); }
 function endOfYear(d){ return new Date(d.getFullYear(), 11, 31, 23,59,59,999); }
-function toISO(d){ return d.toISOString().slice(0,10); }
+function toISO(d){ return localISO(d); }
 
 function periodRange(period){
   if(period.mode === 'range'){
