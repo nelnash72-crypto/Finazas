@@ -670,9 +670,10 @@ input,select{font-family:inherit; min-width:0; max-width:100%;}
     <div class="type-toggle" style="margin:14px 0;" id="qk-type-toggle">
       <button type="button" class="type-btn active" data-type="expense">Gasto</button>
       <button type="button" class="type-btn" data-type="income">Ingreso</button>
+      <button type="button" class="type-btn" data-type="transfer">Transferencia</button>
     </div>
     <form id="qk-form">
-      <div class="field" style="margin-bottom:14px;">
+      <div class="field" style="margin-bottom:14px;" id="qk-category-field">
         <label>Categoría</label>
         <div id="qk-category-grid" class="cat-grid"></div>
         <select id="qk-category" style="display:none;"></select>
@@ -680,12 +681,12 @@ input,select{font-family:inherit; min-width:0; max-width:100%;}
       <div class="field" style="margin-bottom:14px;">
         <label>Fecha</label>
         <div class="date-chip-row" id="qk-date-chips"></div>
+        <input type="date" id="qk-date" style="margin-top:8px;">
       </div>
-      <div class="form-grid">
+      <div class="form-grid" id="qk-fields-normal">
         <div class="field"><label>Cuenta</label><select id="qk-account"></select></div>
         <div class="field"><label>Importe</label><input type="number" id="qk-amount" step="0.01" min="0" placeholder="0,00"></div>
         <div class="field"><label>Subcategoría</label><select id="qk-subcategory"></select></div>
-        <div class="field"><label>Otra fecha</label><input type="date" id="qk-date"></div>
         <div class="field"><label>Deuda relacionada <span class="muted">opcional</span></label><select id="qk-debt"></select></div>
         <div class="field"><label>Tipo de movimiento con la deuda</label>
           <div class="type-toggle" id="qk-debt-mode-toggle" style="max-width:280px;">
@@ -694,8 +695,14 @@ input,select{font-family:inherit; min-width:0; max-width:100%;}
           </div>
         </div>
         <div class="field" id="qk-debt-newperson-field" style="display:none;"><label>Nombre de la persona</label><input type="text" id="qk-debt-newperson" placeholder="Nombre"></div>
-        <div class="field"><label>Nota</label><input type="text" id="qk-note" placeholder="Opcional"></div>
       </div>
+      <div class="form-grid" id="qk-fields-transfer" style="display:none;">
+        <div class="field"><label>Cuenta origen</label><select id="qk-tr-from"></select></div>
+        <div class="field"><label>Cuenta destino</label><select id="qk-tr-to"></select></div>
+        <div class="field"><label>Importe enviado</label><input type="number" id="qk-tr-amount-from" step="0.01" min="0" placeholder="0,00"></div>
+        <div class="field"><label>Importe recibido</label><input type="number" id="qk-tr-amount-to" step="0.01" min="0" placeholder="0,00"></div>
+      </div>
+      <div class="field"><label>Nota</label><input type="text" id="qk-note" placeholder="Opcional"></div>
       <button type="submit" class="btn-primary">Guardar</button>
     </form>
   </div>
@@ -1793,6 +1800,15 @@ function renderGeneralBudget(monthExpenses, elId, pendingFixed){
   const dailyBaseline = freeForVariables / totalDaysInMonth;
   const dailyRemaining = (freeForVariables - variableTotal) / daysRemaining;
 
+  const todayStr = todayISO();
+  let todaySpent = 0;
+  monthExpenses.forEach(t=>{
+    if(t.date!==todayStr || t.source==='recurring' || t.source==='installment') return;
+    const acc = getAccount(t.accountId);
+    todaySpent += toBase(t.amount, acc?acc.currency:state.baseCurrency);
+  });
+  const todayLeft = dailyBaseline - todaySpent;
+
   el.innerHTML = `
     <div${elId ? ' style="padding-bottom:14px; border-bottom:1px solid var(--rule);"' : ''}>
       <div class="budget-top"><div class="budget-cat">${elId ? 'Presupuesto general' : 'Gastado este mes'}</div><div class="budget-nums">${fmtMoney(total)} / ${fmtMoney(limit)}</div></div>
@@ -1806,6 +1822,10 @@ function renderGeneralBudget(monthExpenses, elId, pendingFixed){
         <div class="stat-label">Presupuesto diario libre <span class="muted" style="text-transform:none; font-weight:500;">(descontando fijos)</span></div>
         <div class="balance-num" style="font-size:26px; margin:6px 0 2px; color:${dailyRemaining<0?'var(--over)':'var(--text)'};">${fmtMoney(dailyRemaining)}<span style="font-size:14px; color:var(--text-soft); font-weight:500;"> /día</span></div>
         <div class="stat-sub">Para los ${daysRemaining} días que quedan del mes · si lo repartes parejo desde el día 1: ${fmtMoney(dailyBaseline)}/día</div>
+      </div>
+      <div style="margin-top:12px; padding:10px 14px; background:var(--paper); border:1px solid var(--rule); border-radius:8px; display:flex; justify-content:space-between; align-items:center;">
+        <div class="stat-sub">Hoy: gastaste <strong style="color:var(--text);">${fmtMoney(todaySpent)}</strong> de ${fmtMoney(dailyBaseline)}</div>
+        <div class="stat-sub" style="color:${todayLeft<0?'var(--over)':'var(--teal)'}; font-weight:600;">${todayLeft<0 ? 'Te pasaste '+fmtMoney(Math.abs(todayLeft)) : 'Te quedan '+fmtMoney(todayLeft)}</div>
       </div>
     </div>
   `;
@@ -1936,7 +1956,7 @@ function renderMovimientos(){
 function populateAccountSelects(){
   const opts = state.accounts.map(a=>`<option value="${a.id}">${escapeHtml(a.name)} — ${fmtMoney(accountBalance(a.id), a.currency)}</option>`).join('');
   const defaultId = getDefaultAccountId();
-  ['tx-account','tr-from','tr-to','qk-account'].forEach(id=>{
+  ['tx-account','tr-from','tr-to','qk-account','qk-tr-from','qk-tr-to'].forEach(id=>{
     const sel = document.getElementById(id);
     const prev = sel.value;
     sel.innerHTML = opts;
@@ -3311,11 +3331,19 @@ function exitEditMode(){
 
 /* ================= Quick add (Resumen) ================= */
 function renderQuickAdd(){
-  populateCategorySelect(document.getElementById('qk-category'), state.qkType);
-  populateQkSubcategory();
-  populateDebtSelect(document.getElementById('qk-debt'), state.qkType, state.qkDebtMode);
+  const isTransfer = state.qkType === 'transfer';
+  document.getElementById('qk-category-field').style.display = isTransfer ? 'none' : 'block';
+  document.getElementById('qk-fields-normal').style.display = isTransfer ? 'none' : 'grid';
+  document.getElementById('qk-fields-transfer').style.display = isTransfer ? 'grid' : 'none';
+  if(isTransfer){
+    populateAccountSelects();
+  } else {
+    populateCategorySelect(document.getElementById('qk-category'), state.qkType);
+    populateQkSubcategory();
+    populateDebtSelect(document.getElementById('qk-debt'), state.qkType, state.qkDebtMode);
+    renderQkCategoryGrid();
+  }
   document.getElementById('qk-date').value = document.getElementById('qk-date').value || todayISO();
-  renderQkCategoryGrid();
   renderQkDateChips();
 }
 function renderQkCategoryGrid(){
@@ -3356,10 +3384,18 @@ function setupQuickAdd(){
       document.querySelectorAll('#qk-type-toggle .type-btn').forEach(b=>b.classList.remove('active'));
       btn.classList.add('active');
       state.qkType = btn.dataset.type;
-      populateCategorySelect(document.getElementById('qk-category'), state.qkType);
-      populateQkSubcategory();
-      populateDebtSelect(document.getElementById('qk-debt'), state.qkType, state.qkDebtMode);
-      renderQkCategoryGrid();
+      const isTransfer = state.qkType === 'transfer';
+      document.getElementById('qk-category-field').style.display = isTransfer ? 'none' : 'block';
+      document.getElementById('qk-fields-normal').style.display = isTransfer ? 'none' : 'grid';
+      document.getElementById('qk-fields-transfer').style.display = isTransfer ? 'grid' : 'none';
+      if(!isTransfer){
+        populateCategorySelect(document.getElementById('qk-category'), state.qkType);
+        populateQkSubcategory();
+        populateDebtSelect(document.getElementById('qk-debt'), state.qkType, state.qkDebtMode);
+        renderQkCategoryGrid();
+      } else {
+        populateAccountSelects();
+      }
     });
   });
   document.getElementById('qk-debt-mode-toggle').querySelectorAll('.type-btn').forEach(btn=>{
@@ -3378,6 +3414,10 @@ function setupQuickAdd(){
   document.getElementById('qk-category').addEventListener('change', populateQkSubcategory);
   document.getElementById('qk-date').value = todayISO();
   document.getElementById('qk-date').addEventListener('change', renderQkDateChips);
+
+  document.getElementById('qk-tr-from').addEventListener('change', updateQkTransferSuggestion);
+  document.getElementById('qk-tr-to').addEventListener('change', updateQkTransferSuggestion);
+  document.getElementById('qk-tr-amount-from').addEventListener('input', updateQkTransferSuggestion);
 
   document.addEventListener('click', (e)=>{
     const catPick = e.target.closest('[data-qk-cat-pick]');
@@ -3404,6 +3444,21 @@ function setupQuickAdd(){
   document.getElementById('qk-form').addEventListener('submit', async (e)=>{
     e.preventDefault();
     if(state.accounts.length===0){ toast('Añade primero una cuenta en la pestaña Cuentas'); return; }
+    const qkDate = document.getElementById('qk-date').value || todayISO();
+    if(state.qkType === 'transfer'){
+      const fromId = Number(document.getElementById('qk-tr-from').value);
+      const toId = Number(document.getElementById('qk-tr-to').value);
+      const fromAmount = parseFloat(document.getElementById('qk-tr-amount-from').value);
+      const toAmount = parseFloat(document.getElementById('qk-tr-amount-to').value);
+      if(!fromId || !toId || fromId===toId){ toast('Elige dos cuentas distintas'); return; }
+      if(!fromAmount || fromAmount<=0 || !toAmount || toAmount<=0){ toast('Introduce importes válidos'); return; }
+      await idb.put('transfers', {fromAccountId:fromId, toAccountId:toId, fromAmount, toAmount, date:qkDate, note:document.getElementById('qk-note').value.trim()});
+      await loadAll(); renderAll();
+      document.getElementById('qk-tr-amount-from').value=''; document.getElementById('qk-tr-amount-to').value=''; document.getElementById('qk-note').value='';
+      closeQuickAdd();
+      toast('Transferencia guardada');
+      return;
+    }
     const amount = parseFloat(document.getElementById('qk-amount').value);
     if(!amount || amount<=0){ toast('Introduce un importe válido'); return; }
     const debtIdVal = document.getElementById('qk-debt').value;
@@ -3414,7 +3469,7 @@ function setupQuickAdd(){
       amount,
       categoryId: Number(document.getElementById('qk-category').value),
       subcategory: document.getElementById('qk-subcategory').value,
-      date: document.getElementById('qk-date').value || todayISO(),
+      date: qkDate,
       note: document.getElementById('qk-note').value.trim(),
       debtId: (debtIdVal && debtIdVal!=='__new__') ? Number(debtIdVal) : null,
       debtEffect: debtIdVal ? state.qkDebtMode : null
@@ -3487,6 +3542,15 @@ function budgetAlertMessage(categoryId){
   return null;
 }
 
+function updateQkTransferSuggestion(){
+  const fromId = Number(document.getElementById('qk-tr-from').value);
+  const toId = Number(document.getElementById('qk-tr-to').value);
+  const fromAcc = getAccount(fromId), toAcc = getAccount(toId);
+  const fromAmount = parseFloat(document.getElementById('qk-tr-amount-from').value);
+  if(!fromAcc || !toAcc || !fromAmount) return;
+  const crossRate = effectiveRate(fromAcc.currency) / effectiveRate(toAcc.currency);
+  document.getElementById('qk-tr-amount-to').value = (fromAmount * crossRate).toFixed(2);
+}
 function updateTransferSuggestion(){
   const fromId = Number(document.getElementById('tr-from').value);
   const toId = Number(document.getElementById('tr-to').value);
