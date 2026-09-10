@@ -1,7 +1,9 @@
-const CACHE_NAME = 'libro-finanzas-v3';
+const CACHE_NAME = 'libro-finanzas-v4';
 const ASSETS = [
   './',
   './index.html',
+  './styles.css',
+  './app.js',
   './manifest.json',
   './icons/icon-192.png',
   './icons/icon-512.png',
