@@ -1207,32 +1207,90 @@ function mergedLedger(){
 }
 
 function ledgerRowEl(item){
-  const div = document.createElement('div');
-  div.className = 'ledger-row';
+  const wrap = document.createElement('div');
+  wrap.className = 'ledger-row-wrap';
+  const row = document.createElement('div');
+  row.className = 'ledger-row';
   if(item.itemType==='transfer'){
     const from = getAccount(item.fromAccountId), to = getAccount(item.toAccountId);
-    div.innerHTML = `
+    wrap.innerHTML = `<div class="ledger-row-actions"><button type="button" class="swipe-action edit" data-edit-transfer="${item.id}">Editar</button><button type="button" class="swipe-action delete" data-del-transfer="${item.id}">Eliminar</button></div>`;
+    row.innerHTML = `
       <div class="ledger-desc"><div class="ledger-note">${escapeHtml(item.note || 'Transferencia')}</div><div class="ledger-cat">${from?escapeHtml(from.name):'?'} → ${to?escapeHtml(to.name):'?'}</div></div>
       <div><span class="tag transfer">Transferencia</span></div>
       <div class="ledger-amount transfer">${fmtMoney(item.fromAmount, from?from.currency:state.baseCurrency)}</div>
-      <button class="del-btn" data-edit-transfer="${item.id}" title="Editar">✎</button>
-      <button class="del-btn" data-del-transfer="${item.id}" title="Eliminar">✕</button>
     `;
   } else {
     const acc = getAccount(item.accountId);
     const cat = getCategory(item.categoryId);
     const catLabel = cat ? (catIcon(cat)+' '+cat.name) : 'Sin categoría';
     const secondaryLabel = [item.subcategory ? escapeHtml(item.subcategory) : null, item.note ? escapeHtml(item.note) : null, acc?escapeHtml(acc.name):null].filter(Boolean).join(' · ');
-    div.innerHTML = `
+    wrap.innerHTML = `<div class="ledger-row-actions"><button type="button" class="swipe-action edit" data-edit-tx="${item.id}">Editar</button><button type="button" class="swipe-action delete" data-del-tx="${item.id}">Eliminar</button></div>`;
+    row.innerHTML = `
       <div class="ledger-desc"><div class="ledger-note">${escapeHtml(catLabel)}</div><div class="ledger-cat">${secondaryLabel}</div></div>
       <div><span class="tag ${item.kind}">${item.kind==='income'?'Ingreso':'Gasto'}</span></div>
       <div class="ledger-amount ${item.kind}">${item.kind==='income'?'+':'-'}${fmtMoney(item.amount, acc?acc.currency:state.baseCurrency).replace('-','')}</div>
-      <button class="del-btn" data-edit-tx="${item.id}" title="Editar">✎</button>
-      <button class="del-btn" data-del-tx="${item.id}" title="Eliminar">✕</button>
     `;
   }
-  return div;
+  wrap.appendChild(row);
+  return wrap;
 }
+
+// Deslizar una fila de movimiento hacia la izquierda revela Editar/Eliminar (patrón swipe-to-reveal),
+// en vez de los botones pequeños fijos. Delegado a nivel de documento porque las filas se regeneran
+// en cada render (ver renderLedgerList) y así no hay que re-enlazar listeners por fila.
+let ledgerSwipe = null;
+function closeLedgerSwipe(wrap){
+  const row = wrap.querySelector('.ledger-row');
+  row.style.transition = 'transform .18s ease';
+  row.style.transform = 'translateX(0)';
+  wrap.classList.remove('swiped');
+  setTimeout(()=>{ row.style.transition=''; }, 200);
+}
+function setupLedgerSwipe(){
+  document.addEventListener('pointerdown', (e)=>{
+    if(e.pointerType==='mouse' && e.button!==0) return;
+    const wrap = e.target.closest('.ledger-row-wrap');
+    document.querySelectorAll('.ledger-row-wrap.swiped').forEach(w=>{ if(w!==wrap) closeLedgerSwipe(w); });
+    if(!wrap) return;
+    ledgerSwipe = {wrap, startX:e.clientX, startY:e.clientY, dx:0, dragging:false, wasSwiped: wrap.classList.contains('swiped')};
+  });
+  document.addEventListener('pointermove', (e)=>{
+    if(!ledgerSwipe) return;
+    const dx = e.clientX - ledgerSwipe.startX;
+    const dy = e.clientY - ledgerSwipe.startY;
+    if(!ledgerSwipe.dragging){
+      if(Math.abs(dx) > 8 && Math.abs(dx) > Math.abs(dy)){ ledgerSwipe.dragging = true; }
+      else if(Math.abs(dy) > 8){ ledgerSwipe = null; return; }
+      else return;
+    }
+    const actionsW = ledgerSwipe.wrap.querySelector('.ledger-row-actions').getBoundingClientRect().width || 132;
+    const base = ledgerSwipe.wasSwiped ? -actionsW : 0;
+    const clamped = Math.min(0, Math.max(-actionsW*1.1, base + dx));
+    ledgerSwipe.dx = clamped;
+    ledgerSwipe.wrap.querySelector('.ledger-row').style.transform = `translateX(${clamped}px)`;
+  });
+  const endSwipe = ()=>{
+    if(!ledgerSwipe) return;
+    if(ledgerSwipe.dragging){
+      const wrap = ledgerSwipe.wrap;
+      const actionsW = wrap.querySelector('.ledger-row-actions').getBoundingClientRect().width || 132;
+      const row = wrap.querySelector('.ledger-row');
+      row.style.transition = 'transform .18s ease';
+      if(ledgerSwipe.dx < -actionsW*0.5){
+        row.style.transform = `translateX(-${actionsW}px)`;
+        wrap.classList.add('swiped');
+      } else {
+        row.style.transform = 'translateX(0)';
+        wrap.classList.remove('swiped');
+      }
+      setTimeout(()=>{ row.style.transition=''; }, 200);
+    }
+    ledgerSwipe = null;
+  };
+  document.addEventListener('pointerup', endSwipe);
+  document.addEventListener('pointercancel', endSwipe);
+}
+
 
 // Agrupa una lista de movimientos (ya ordenada) bajo encabezados de fecha, ej. "1 de agosto de 2026 (sáb)",
 // en vez de repetir la fecha en cada fila — pensado para ahorrar espacio horizontal en el celular.
@@ -2661,11 +2719,14 @@ function renderQuickAdd(){
   document.getElementById('qk-date').value = document.getElementById('qk-date').value || todayISO();
   renderQkDateChips();
 }
+const QK_CATEGORY_LIMIT = 6;
 function renderQkCategoryGrid(){
-  const cats = sortedCategories(state.qkType);
+  const allCats = sortedCategories(state.qkType);
+  const expanded = state.qkCategoryExpanded || allCats.length <= QK_CATEGORY_LIMIT;
+  const cats = expanded ? allCats : allCats.slice(0, QK_CATEGORY_LIMIT);
   const currentVal = document.getElementById('qk-category').value;
   const grid = document.getElementById('qk-category-grid');
-  grid.innerHTML = cats.map((c,i)=>{
+  let html = cats.map((c,i)=>{
     const color = PALETTE[i % PALETTE.length];
     const selected = String(c.id)===String(currentVal);
     return `
@@ -2675,6 +2736,15 @@ function renderQkCategoryGrid(){
       </button>
     `;
   }).join('');
+  if(!expanded){
+    html += `
+      <button type="button" class="cat-grid-item" data-qk-cat-more="1">
+        <span class="cat-grid-circle" style="background:var(--paper-raised); border-color:var(--rule-strong); color:var(--text-soft);">+${allCats.length-QK_CATEGORY_LIMIT}</span>
+        <span class="cat-grid-label">Ver más</span>
+      </button>
+    `;
+  }
+  grid.innerHTML = html;
 }
 function renderQkDateChips(){
   const today = todayISO();
@@ -2699,6 +2769,7 @@ function setupQuickAdd(){
       document.querySelectorAll('#qk-type-toggle .type-btn').forEach(b=>b.classList.remove('active'));
       btn.classList.add('active');
       state.qkType = btn.dataset.type;
+      state.qkCategoryExpanded = false;
       const isTransfer = state.qkType === 'transfer';
       document.getElementById('qk-category-field').style.display = isTransfer ? 'none' : 'block';
       document.getElementById('qk-fields-normal').style.display = isTransfer ? 'none' : 'grid';
@@ -2739,6 +2810,12 @@ function setupQuickAdd(){
     if(catPick){
       document.getElementById('qk-category').value = catPick.dataset.qkCatPick;
       populateQkSubcategory();
+      renderQkCategoryGrid();
+      return;
+    }
+    const catMore = e.target.closest('[data-qk-cat-more]');
+    if(catMore){
+      state.qkCategoryExpanded = true;
       renderQkCategoryGrid();
       return;
     }
@@ -2806,13 +2883,14 @@ function setupQuickAdd(){
 
 function openQuickAdd(){
   state.qkDebtMode = 'payment';
+  state.qkCategoryExpanded = false;
   document.querySelectorAll('#qk-debt-mode-toggle .type-btn').forEach(b=>b.classList.toggle('active', b.dataset.debtmode==='payment'));
   document.getElementById('qk-debt-newperson-field').style.display = 'none';
   document.getElementById('qk-debt-newperson').value = '';
   renderQuickAdd();
   document.getElementById('quick-add-overlay').style.display = 'flex';
+  document.querySelector('#quick-add-overlay .modal-panel').scrollTop = 0;
   pushOverlayState();
-  setTimeout(()=> document.getElementById('qk-amount').focus(), 50);
 }
 function closeQuickAdd(){
   history.back();
@@ -3502,6 +3580,7 @@ async function init(){
     setupDebts();
     setupInstallments();
     setupSearch();
+    setupLedgerSwipe();
     document.addEventListener('change', (e)=>{
       if(e.target && e.target.id==='cashflow-range'){
         state.cashflowRange = Number(e.target.value) || 30;
