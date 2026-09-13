@@ -52,70 +52,7 @@
 
       <div id="shortcuts-row" style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:20px;"></div>
 
-      <div class="grid-2">
-        <div class="card">
-          <div class="balance-label">Saldo total</div>
-          <div class="balance-num" id="stat-balance">€0,00</div>
-          <div class="balance-sub" id="balance-sub"></div>
-          <svg class="balance-trend" id="balance-trend" viewBox="0 0 300 56" preserveAspectRatio="none"></svg>
-          <div class="accounts-mini" id="accounts-mini"></div>
-          <button class="link-btn" id="toggle-hidden-accts">Mostrar cuentas ocultas</button>
-        </div>
-        <div class="card">
-          <div class="section-title" style="margin-bottom:10px;">Presupuestos de este mes</div>
-          <div id="resumen-general-budget" style="margin-bottom:14px;"></div>
-          <div id="resumen-budgets"></div>
-        </div>
-      </div>
-
-      <div class="card" id="card-payment-alerts" style="display:none;">
-        <div class="section-title">Avisos de pago de tarjeta</div>
-        <div id="payment-alerts-list"></div>
-      </div>
-
-      <div class="card">
-        <div class="section-title">Patrimonio neto <span class="muted">Incluye cuentas ocultas</span></div>
-        <div class="balance-num" id="networth-total" style="font-size:26px; margin-bottom:12px;">€0,00</div>
-        <div id="networth-breakdown"></div>
-      </div>
-
-      <div class="card">
-        <div class="section-title">Ingresos y gastos</div>
-        <div class="period-bar" id="resumen-period"></div>
-        <div class="grid-3" style="margin-bottom:22px;">
-          <div>
-            <div class="stat-label">Ingresos</div>
-            <div class="stat-num income" id="stat-income">€0,00</div>
-            <div class="stat-sub" id="stat-income-count"></div>
-          </div>
-          <div>
-            <div class="stat-label">Gastos</div>
-            <div class="stat-num expense" id="stat-expense">€0,00</div>
-            <div class="stat-sub" id="stat-expense-count"></div>
-          </div>
-          <div>
-            <div class="stat-label">Balance del período</div>
-            <div class="stat-num" id="stat-net">€0,00</div>
-            <div class="stat-sub" id="stat-compare"></div>
-          </div>
-        </div>
-        <div class="section-title" style="font-size:15px;">Gastos por categoría</div>
-        <div class="chart-wrap" id="resumen-chart"></div>
-      </div>
-
-      <div class="card">
-        <div class="section-title">Proyección de flujo de caja <select id="cashflow-range" style="font-family:var(--font-body); font-size:12.5px; font-weight:500; border:1px solid var(--rule-strong); border-radius:7px; padding:5px 8px; background:var(--paper);">
-          <option value="30">Próximos 30 días</option>
-          <option value="60">Próximos 60 días</option>
-        </select></div>
-        <div class="stat-sub" id="cashflow-total" style="margin-bottom:10px;"></div>
-        <div id="cashflow-list"></div>
-      </div>
-
-      <div class="card">
-        <div class="section-title">Últimos movimientos</div>
-        <div class="ledger" id="resumen-recent"></div>
-      </div>
+      <div id="resumen-blocks"></div>
     </section>
 
     <!-- MOVIMIENTOS -->
@@ -331,6 +268,11 @@
       <div class="card">
         <div class="section-title">Color de acento</div>
         <div id="accent-swatches" style="display:flex; gap:12px; flex-wrap:wrap;"></div>
+      </div>
+
+      <div class="card">
+        <div class="section-title">Personalizar Resumen <span class="muted">Qué se ve y en qué orden</span></div>
+        <div id="resumen-layout-list"></div>
       </div>
 
       <div class="card">

@@ -178,6 +178,12 @@ function fmtDate(iso){
   const d = new Date(iso + "T00:00:00");
   return d.toLocaleDateString('es-ES', {day:'2-digit', month:'short'});
 }
+function fmtDateHeader(iso){
+  const d = new Date(iso + "T00:00:00");
+  const full = d.toLocaleDateString('es-ES', {day:'numeric', month:'long', year:'numeric'});
+  const wd = d.toLocaleDateString('es-ES', {weekday:'short'}).replace(/\.$/, '');
+  return `${full} (${wd})`;
+}
 function cap(s){ return s.charAt(0).toUpperCase() + s.slice(1); }
 function escapeHtml(s){ const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
 
@@ -207,6 +213,8 @@ async function loadAll(){
   state.darkMode = darkSetting ? darkSetting.value : false;
   const scaleSetting = settings.find(s=>s.key==='textScale');
   state.textScale = scaleSetting ? scaleSetting.value : 100;
+  const resumenLayoutSetting = settings.find(s=>s.key==='resumenLayout');
+  state.resumenLayout = resumenLayoutSetting ? resumenLayoutSetting.value : defaultResumenLayout();
   state.goals = goals;
   state.recurring = recurring;
   state.reminders = reminders.sort((a,b)=> (a.done===b.done?0:(a.done?1:-1)) || (a.dueDate||'').localeCompare(b.dueDate||''));
@@ -652,100 +660,256 @@ function renderPeriodBar(containerId, periodKey, onChange){
 /* ================= Rendering: Resumen ================= */
 function renderResumen(){
   renderQuickAdd();
+  renderResumenBlocksContainer();
   renderShortcutsRow();
   const includeHidden = state.showHiddenAccts;
-  const bal = totalBalanceBase(false);
+
   const balEl = document.getElementById('stat-balance');
-  balEl.textContent = fmtMoney(bal);
-  balEl.classList.toggle('neg', bal<0);
-  document.getElementById('balance-sub').textContent = 'En ' + (CURRENCY_META[state.baseCurrency]?.name || state.baseCurrency);
-  renderBalanceTrend();
+  if(balEl){
+    const bal = totalBalanceBase(false);
+    balEl.textContent = fmtMoney(bal);
+    balEl.classList.toggle('neg', bal<0);
+    document.getElementById('balance-sub').textContent = 'En ' + (CURRENCY_META[state.baseCurrency]?.name || state.baseCurrency);
+    renderBalanceTrend();
+    const miniEl = document.getElementById('accounts-mini');
+    miniEl.innerHTML = '';
+    state.accounts.filter(a => includeHidden || a.visible !== false).forEach(a=>{
+      const row = document.createElement('div');
+      row.className = 'acct-mini-row';
+      row.innerHTML = `<span class="name">${escapeHtml(a.name)} ${a.visible===false?'<span style="color:var(--text-faint); font-weight:400;">(oculta)</span>':''}</span><span class="amt">${fmtMoney(accountBalance(a.id), a.currency)}</span>`;
+      miniEl.appendChild(row);
+    });
+    document.getElementById('toggle-hidden-accts').textContent = includeHidden ? 'Ocultar cuentas ocultas' : 'Mostrar cuentas ocultas';
+  }
+
   renderNetWorth();
   renderPaymentAlerts();
   renderCashflow();
 
-  const miniEl = document.getElementById('accounts-mini');
-  miniEl.innerHTML = '';
-  state.accounts.filter(a => includeHidden || a.visible !== false).forEach(a=>{
-    const row = document.createElement('div');
-    row.className = 'acct-mini-row';
-    row.innerHTML = `<span class="name">${escapeHtml(a.name)} ${a.visible===false?'<span style="color:var(--text-faint); font-weight:400;">(oculta)</span>':''}</span><span class="amt">${fmtMoney(accountBalance(a.id), a.currency)}</span>`;
-    miniEl.appendChild(row);
-  });
-  document.getElementById('toggle-hidden-accts').textContent = includeHidden ? 'Ocultar cuentas ocultas' : 'Mostrar cuentas ocultas';
-
   const now = new Date();
   const mStart = toISO(startOfMonth(now)), mEnd = toISO(endOfMonth(now));
   const monthExpenses = txInRange(state.transactions, mStart, mEnd).filter(t=>t.kind==='expense');
-  const spendByCat = {};
-  monthExpenses.forEach(t=>{ const acc=getAccount(t.accountId); const amt = toBase(t.amount, acc?acc.currency:state.baseCurrency); spendByCat[t.categoryId] = (spendByCat[t.categoryId]||0)+amt; });
-  const budgetCats = Object.keys(state.budgets).filter(cid => state.budgets[cid] > 0);
+
+  if(document.getElementById('resumen-general-budget')){
+    renderGeneralBudget(monthExpenses, 'resumen-general-budget', computeMonthFixedProjection(mStart, mEnd));
+  }
   const budgetsEl = document.getElementById('resumen-budgets');
-  budgetsEl.innerHTML = '';
-  renderGeneralBudget(monthExpenses, 'resumen-general-budget', computeMonthFixedProjection(mStart, mEnd));
-  if(budgetCats.length===0){
-    budgetsEl.innerHTML = '<div class="empty-note">Fija límites en la pestaña Presupuestos.</div>';
-  } else {
-    budgetCats.slice(0,5).forEach(cid=>{
-      const cat = getCategory(Number(cid));
-      if(!cat) return;
-      budgetsEl.appendChild(budgetRowEl(catIcon(cat)+' '+cat.name, spendByCat[cid]||0, state.budgets[cid], cat.id));
-    });
+  if(budgetsEl){
+    const spendByCat = {};
+    monthExpenses.forEach(t=>{ const acc=getAccount(t.accountId); const amt = toBase(t.amount, acc?acc.currency:state.baseCurrency); spendByCat[t.categoryId] = (spendByCat[t.categoryId]||0)+amt; });
+    const budgetCats = Object.keys(state.budgets).filter(cid => state.budgets[cid] > 0);
+    budgetsEl.innerHTML = '';
+    if(budgetCats.length===0){
+      budgetsEl.innerHTML = '<div class="empty-note">Fija límites en la pestaña Presupuestos.</div>';
+    } else {
+      budgetCats.slice(0,5).forEach(cid=>{
+        const cat = getCategory(Number(cid));
+        if(!cat) return;
+        budgetsEl.appendChild(budgetRowEl(catIcon(cat)+' '+cat.name, spendByCat[cid]||0, state.budgets[cid], cat.id));
+      });
+    }
   }
 
-  renderPeriodBar('resumen-period', 'resumenPeriod', renderResumen);
-  const range = periodRange(state.resumenPeriod);
-  const periodTx = txInRange(state.transactions, range.start, range.end);
-  let income=0, expense=0, incomeCount=0, expenseCount=0;
-  const catSpend = {};
-  periodTx.forEach(t=>{
-    const acc = getAccount(t.accountId);
-    const amt = toBase(t.amount, acc?acc.currency:state.baseCurrency);
-    if(t.kind==='income'){ income+=amt; incomeCount++; }
-    else{ expense+=amt; expenseCount++; catSpend[t.categoryId]=(catSpend[t.categoryId]||0)+amt; }
-  });
-  document.getElementById('stat-income').textContent = fmtMoney(income);
-  document.getElementById('stat-income-count').textContent = incomeCount + (incomeCount===1?' movimiento':' movimientos');
-  document.getElementById('stat-expense').textContent = fmtMoney(expense);
-  document.getElementById('stat-expense-count').textContent = expenseCount + (expenseCount===1?' movimiento':' movimientos');
-  const netEl = document.getElementById('stat-net');
-  netEl.textContent = fmtMoney(income-expense);
-  netEl.style.color = (income-expense) < 0 ? 'var(--over)' : 'var(--text)';
+  if(document.getElementById('resumen-period')){
+    renderPeriodBar('resumen-period', 'resumenPeriod', renderResumen);
+    const range = periodRange(state.resumenPeriod);
+    const periodTx = txInRange(state.transactions, range.start, range.end);
+    let income=0, expense=0, incomeCount=0, expenseCount=0;
+    const catSpend = {};
+    periodTx.forEach(t=>{
+      const acc = getAccount(t.accountId);
+      const amt = toBase(t.amount, acc?acc.currency:state.baseCurrency);
+      if(t.kind==='income'){ income+=amt; incomeCount++; }
+      else{ expense+=amt; expenseCount++; catSpend[t.categoryId]=(catSpend[t.categoryId]||0)+amt; }
+    });
+    document.getElementById('stat-income').textContent = fmtMoney(income);
+    document.getElementById('stat-income-count').textContent = incomeCount + (incomeCount===1?' movimiento':' movimientos');
+    document.getElementById('stat-expense').textContent = fmtMoney(expense);
+    document.getElementById('stat-expense-count').textContent = expenseCount + (expenseCount===1?' movimiento':' movimientos');
+    const netEl = document.getElementById('stat-net');
+    netEl.textContent = fmtMoney(income-expense);
+    netEl.style.color = (income-expense) < 0 ? 'var(--over)' : 'var(--text)';
 
-  const compareEl = document.getElementById('stat-compare');
-  if(state.resumenPeriod.mode === 'month'){
-    const ref = new Date(state.resumenPeriod.ref + "T00:00:00");
-    const prevRef = new Date(ref.getFullYear(), ref.getMonth()-1, 1);
-    const pStart = toISO(startOfMonth(prevRef)), pEnd = toISO(endOfMonth(prevRef));
-    const prevExpenses = txInRange(state.transactions, pStart, pEnd).filter(t=>t.kind==='expense')
-      .reduce((s,t)=>{ const acc=getAccount(t.accountId); return s + toBase(t.amount, acc?acc.currency:state.baseCurrency); }, 0);
-    if(prevExpenses > 0){
-      const diffPct = ((expense - prevExpenses) / prevExpenses) * 100;
-      const arrow = diffPct > 0 ? '▲' : (diffPct < 0 ? '▼' : '·');
-      compareEl.textContent = `${arrow} ${Math.abs(diffPct).toFixed(0)}% en gastos vs mes anterior`;
-      compareEl.style.color = diffPct > 0 ? 'var(--over)' : 'var(--teal)';
+    const compareEl = document.getElementById('stat-compare');
+    if(state.resumenPeriod.mode === 'month'){
+      const ref = new Date(state.resumenPeriod.ref + "T00:00:00");
+      const prevRef = new Date(ref.getFullYear(), ref.getMonth()-1, 1);
+      const pStart = toISO(startOfMonth(prevRef)), pEnd = toISO(endOfMonth(prevRef));
+      const prevExpenses = txInRange(state.transactions, pStart, pEnd).filter(t=>t.kind==='expense')
+        .reduce((s,t)=>{ const acc=getAccount(t.accountId); return s + toBase(t.amount, acc?acc.currency:state.baseCurrency); }, 0);
+      if(prevExpenses > 0){
+        const diffPct = ((expense - prevExpenses) / prevExpenses) * 100;
+        const arrow = diffPct > 0 ? '▲' : (diffPct < 0 ? '▼' : '·');
+        compareEl.textContent = `${arrow} ${Math.abs(diffPct).toFixed(0)}% en gastos vs mes anterior`;
+        compareEl.style.color = diffPct > 0 ? 'var(--over)' : 'var(--teal)';
+      } else {
+        compareEl.textContent = '';
+      }
     } else {
       compareEl.textContent = '';
     }
-  } else {
-    compareEl.textContent = '';
-  }
 
-  renderChart('resumen-chart', catSpend, periodTx);
+    renderChart('resumen-chart', catSpend, periodTx);
+  }
 
   const recentEl = document.getElementById('resumen-recent');
-  recentEl.innerHTML = '';
-  const recentItems = mergedLedger().slice(0,6);
-  if(recentItems.length===0){
-    recentEl.innerHTML = '<div class="empty-note">Aún no hay movimientos.</div>';
-  } else {
-    recentItems.forEach(it => recentEl.appendChild(ledgerRowEl(it)));
+  if(recentEl){
+    const recentItems = mergedLedger().slice(0,6);
+    if(recentItems.length===0){
+      recentEl.innerHTML = '<div class="empty-note">Aún no hay movimientos.</div>';
+    } else {
+      renderLedgerList(recentEl, recentItems);
+    }
   }
 }
+
+/* ================= Personalización de bloques del Resumen ================= */
+const RESUMEN_BLOCKS_META = [
+  {id:'saldo', label:'Saldo total'},
+  {id:'presupuestos', label:'Presupuestos de este mes'},
+  {id:'avisos', label:'Avisos de pago de tarjeta'},
+  {id:'patrimonio', label:'Patrimonio neto'},
+  {id:'ingresos-gastos', label:'Ingresos y gastos'},
+  {id:'flujo-caja', label:'Proyección de flujo de caja'},
+  {id:'movimientos', label:'Últimos movimientos'}
+];
+const RESUMEN_BLOCK_HTML = {
+  saldo: `<div class="card">
+      <div class="balance-label">Saldo total</div>
+      <div class="balance-num" id="stat-balance">€0,00</div>
+      <div class="balance-sub" id="balance-sub"></div>
+      <svg class="balance-trend" id="balance-trend" viewBox="0 0 300 56" preserveAspectRatio="none"></svg>
+      <div class="accounts-mini" id="accounts-mini"></div>
+      <button class="link-btn" id="toggle-hidden-accts">Mostrar cuentas ocultas</button>
+    </div>`,
+  presupuestos: `<div class="card">
+      <div class="section-title" style="margin-bottom:10px;">Presupuestos de este mes</div>
+      <div id="resumen-general-budget" style="margin-bottom:14px;"></div>
+      <div id="resumen-budgets"></div>
+    </div>`,
+  avisos: `<div class="card" id="card-payment-alerts" style="display:none;">
+      <div class="section-title">Avisos de pago de tarjeta</div>
+      <div id="payment-alerts-list"></div>
+    </div>`,
+  patrimonio: `<div class="card">
+      <div class="section-title">Patrimonio neto <span class="muted">Incluye cuentas ocultas</span></div>
+      <div class="balance-num" id="networth-total" style="font-size:26px; margin-bottom:12px;">€0,00</div>
+      <div id="networth-breakdown"></div>
+    </div>`,
+  'ingresos-gastos': `<div class="card">
+      <div class="section-title">Ingresos y gastos</div>
+      <div class="period-bar" id="resumen-period"></div>
+      <div class="grid-3" style="margin-bottom:22px;">
+        <div>
+          <div class="stat-label">Ingresos</div>
+          <div class="stat-num income" id="stat-income">€0,00</div>
+          <div class="stat-sub" id="stat-income-count"></div>
+        </div>
+        <div>
+          <div class="stat-label">Gastos</div>
+          <div class="stat-num expense" id="stat-expense">€0,00</div>
+          <div class="stat-sub" id="stat-expense-count"></div>
+        </div>
+        <div>
+          <div class="stat-label">Balance del período</div>
+          <div class="stat-num" id="stat-net">€0,00</div>
+          <div class="stat-sub" id="stat-compare"></div>
+        </div>
+      </div>
+      <div class="section-title" style="font-size:15px;">Gastos por categoría</div>
+      <div class="chart-wrap" id="resumen-chart"></div>
+    </div>`,
+  'flujo-caja': `<div class="card">
+      <div class="section-title">Proyección de flujo de caja <select id="cashflow-range" style="font-family:var(--font-body); font-size:12.5px; font-weight:500; border:1px solid var(--rule-strong); border-radius:7px; padding:5px 8px; background:var(--paper);">
+        <option value="30" __SEL30__>Próximos 30 días</option>
+        <option value="60" __SEL60__>Próximos 60 días</option>
+      </select></div>
+      <div class="stat-sub" id="cashflow-total" style="margin-bottom:10px;"></div>
+      <div id="cashflow-list"></div>
+    </div>`,
+  movimientos: `<div class="card">
+      <div class="section-title">Últimos movimientos</div>
+      <div class="ledger" id="resumen-recent"></div>
+    </div>`
+};
+function defaultResumenLayout(){
+  return RESUMEN_BLOCKS_META.map(b=>({id:b.id, visible:true}));
+}
+function getResumenLayout(){
+  const saved = state.resumenLayout || [];
+  const validIds = new Set(RESUMEN_BLOCKS_META.map(b=>b.id));
+  const merged = saved.filter(x=>validIds.has(x.id));
+  const mergedIds = new Set(merged.map(x=>x.id));
+  RESUMEN_BLOCKS_META.forEach(b=>{ if(!mergedIds.has(b.id)) merged.push({id:b.id, visible:true}); });
+  return merged;
+}
+function renderResumenBlocksContainer(){
+  const container = document.getElementById('resumen-blocks');
+  if(!container) return;
+  const layout = getResumenLayout();
+  const range = state.cashflowRange || 30;
+  container.innerHTML = layout.filter(b=>b.visible).map(b=>{
+    let html = RESUMEN_BLOCK_HTML[b.id];
+    if(b.id==='flujo-caja'){
+      html = html.replace('__SEL30__', range===30 ? 'selected' : '').replace('__SEL60__', range===60 ? 'selected' : '');
+    }
+    return html;
+  }).join('');
+}
+async function saveResumenLayout(layout){
+  state.resumenLayout = layout;
+  await idb.put('settings', {key:'resumenLayout', value: layout});
+}
+function renderResumenLayoutSettings(){
+  const el = document.getElementById('resumen-layout-list');
+  if(!el) return;
+  const layout = getResumenLayout();
+  const metaById = {}; RESUMEN_BLOCKS_META.forEach(b=> metaById[b.id]=b.label);
+  el.innerHTML = layout.map((b,i)=>`
+    <div class="rate-row">
+      <div style="${b.visible?'':'color:var(--text-faint);'}">${metaById[b.id]||b.id}</div>
+      <div style="display:flex; gap:6px;">
+        <button type="button" class="icon-btn" data-resumen-up="${b.id}" ${i===0?'disabled':''} title="Subir">▲</button>
+        <button type="button" class="icon-btn" data-resumen-down="${b.id}" ${i===layout.length-1?'disabled':''} title="Bajar">▼</button>
+        <button type="button" class="icon-btn" data-resumen-vis="${b.id}" title="${b.visible?'Ocultar':'Mostrar'}">${b.visible?'👁':'🚫'}</button>
+      </div>
+    </div>
+  `).join('');
+}
+function setupResumenLayoutSettings(){
+  document.addEventListener('click', async (e)=>{
+    const visBtn = e.target.closest('[data-resumen-vis]');
+    if(visBtn){
+      const layout = getResumenLayout();
+      const item = layout.find(x=>x.id===visBtn.dataset.resumenVis);
+      if(item) item.visible = !item.visible;
+      await saveResumenLayout(layout);
+      renderResumenLayoutSettings();
+      renderResumen();
+      return;
+    }
+    const upBtn = e.target.closest('[data-resumen-up]');
+    if(upBtn){
+      const layout = getResumenLayout();
+      const idx = layout.findIndex(x=>x.id===upBtn.dataset.resumenUp);
+      if(idx>0){ const tmp=layout[idx-1]; layout[idx-1]=layout[idx]; layout[idx]=tmp; await saveResumenLayout(layout); renderResumenLayoutSettings(); renderResumen(); }
+      return;
+    }
+    const downBtn = e.target.closest('[data-resumen-down]');
+    if(downBtn){
+      const layout = getResumenLayout();
+      const idx = layout.findIndex(x=>x.id===downBtn.dataset.resumenDown);
+      if(idx>=0 && idx<layout.length-1){ const tmp=layout[idx+1]; layout[idx+1]=layout[idx]; layout[idx]=tmp; await saveResumenLayout(layout); renderResumenLayoutSettings(); renderResumen(); }
+      return;
+    }
+  });
+}
+
 
 function renderPaymentAlerts(){
   const card = document.getElementById('card-payment-alerts');
   const list = document.getElementById('payment-alerts-list');
+  if(!card || !list) return;
   const today = todayISO();
   const alerts = [];
   state.accounts.forEach(a=>{
@@ -841,10 +1005,11 @@ function computeCashflowProjection(days){
 }
 function renderCashflow(){
   const sel = document.getElementById('cashflow-range');
-  const days = Number(sel.value) || 30;
-  const items = computeCashflowProjection(days);
   const listEl = document.getElementById('cashflow-list');
   const totalEl = document.getElementById('cashflow-total');
+  if(!sel || !listEl || !totalEl) return;
+  const days = Number(sel.value) || 30;
+  const items = computeCashflowProjection(days);
   if(items.length===0){
     listEl.innerHTML = '<div class="empty-note">Sin pagos ni ingresos comprometidos en este período.</div>';
     totalEl.textContent = '';
@@ -864,8 +1029,10 @@ function renderCashflow(){
 }
 
 function renderNetWorth(){
-  const total = totalBalanceBase(true);
   const totalEl = document.getElementById('networth-total');
+  const el = document.getElementById('networth-breakdown');
+  if(!totalEl || !el) return;
+  const total = totalBalanceBase(true);
   totalEl.textContent = fmtMoney(total);
   totalEl.style.color = total < 0 ? 'var(--over)' : 'var(--text)';
   const byType = {};
@@ -874,7 +1041,6 @@ function renderNetWorth(){
     byType[a.type] = (byType[a.type]||0) + val;
   });
   const typeLabels = {efectivo:'Efectivo', banco:'Banco', ahorros:'Ahorros', otro:'Otro'};
-  const el = document.getElementById('networth-breakdown');
   const entries = Object.entries(byType).filter(([,v])=>v!==0);
   if(entries.length===0){ el.innerHTML = '<div class="empty-note">Sin cuentas todavía.</div>'; return; }
   const maxAbs = Math.max(...entries.map(([,v])=>Math.abs(v))) || 1;
@@ -997,6 +1163,7 @@ function goToBudgetEdit(categoryId){
 
 function renderChart(containerId, catSpend, periodTx){
   const el = document.getElementById(containerId);
+  if(!el) return;
   const entries = Object.entries(catSpend).filter(([,v])=>v>0).sort((a,b)=>b[1]-a[1]);
   if(entries.length===0){ el.innerHTML = '<div class="empty-note">Sin gastos en este período.</div>'; return; }
   const total = entries.reduce((s,[,v])=>s+v,0);
@@ -1045,7 +1212,6 @@ function ledgerRowEl(item){
   if(item.itemType==='transfer'){
     const from = getAccount(item.fromAccountId), to = getAccount(item.toAccountId);
     div.innerHTML = `
-      <div class="ledger-date">${fmtDate(item.date)}</div>
       <div class="ledger-desc"><div class="ledger-note">${escapeHtml(item.note || 'Transferencia')}</div><div class="ledger-cat">${from?escapeHtml(from.name):'?'} → ${to?escapeHtml(to.name):'?'}</div></div>
       <div><span class="tag transfer">Transferencia</span></div>
       <div class="ledger-amount transfer">${fmtMoney(item.fromAmount, from?from.currency:state.baseCurrency)}</div>
@@ -1058,7 +1224,6 @@ function ledgerRowEl(item){
     const catLabel = cat ? (catIcon(cat)+' '+cat.name) : 'Sin categoría';
     const secondaryLabel = [item.subcategory ? escapeHtml(item.subcategory) : null, item.note ? escapeHtml(item.note) : null, acc?escapeHtml(acc.name):null].filter(Boolean).join(' · ');
     div.innerHTML = `
-      <div class="ledger-date">${fmtDate(item.date)}</div>
       <div class="ledger-desc"><div class="ledger-note">${escapeHtml(catLabel)}</div><div class="ledger-cat">${secondaryLabel}</div></div>
       <div><span class="tag ${item.kind}">${item.kind==='income'?'Ingreso':'Gasto'}</span></div>
       <div class="ledger-amount ${item.kind}">${item.kind==='income'?'+':'-'}${fmtMoney(item.amount, acc?acc.currency:state.baseCurrency).replace('-','')}</div>
@@ -1067,6 +1232,23 @@ function ledgerRowEl(item){
     `;
   }
   return div;
+}
+
+// Agrupa una lista de movimientos (ya ordenada) bajo encabezados de fecha, ej. "1 de agosto de 2026 (sáb)",
+// en vez de repetir la fecha en cada fila — pensado para ahorrar espacio horizontal en el celular.
+function renderLedgerList(container, items){
+  container.innerHTML = '';
+  let lastDate = null;
+  items.forEach(it=>{
+    if(it.date !== lastDate){
+      const header = document.createElement('div');
+      header.className = 'ledger-date-header';
+      header.textContent = fmtDateHeader(it.date);
+      container.appendChild(header);
+      lastDate = it.date;
+    }
+    container.appendChild(ledgerRowEl(it));
+  });
 }
 
 /* ================= Rendering: Movimientos ================= */
@@ -1134,11 +1316,10 @@ function filterAndRenderTx(){
   }
 
   const listEl = document.getElementById('tx-list');
-  listEl.innerHTML = '';
   if(list.length===0){
     listEl.innerHTML = '<div class="empty-note">No hay movimientos que coincidan con estos filtros.</div>';
   } else {
-    list.forEach(it => listEl.appendChild(ledgerRowEl(it)));
+    renderLedgerList(listEl, list);
   }
 
   renderSearchExtras(searchVal);
@@ -2232,6 +2413,7 @@ function renderAjustes(){
   `).join('');
 
   refreshOneDriveSyncUI();
+  renderResumenLayoutSettings();
 }
 
 /* ================= Global render ================= */
@@ -3123,6 +3305,7 @@ function setupAjustes(){
   });
 
   setupOneDriveSync();
+  setupResumenLayoutSettings();
 }
 
 /* ================= Copia de seguridad: datos compartidos entre export/import y sync con OneDrive ================= */
@@ -3319,7 +3502,12 @@ async function init(){
     setupDebts();
     setupInstallments();
     setupSearch();
-    document.getElementById('cashflow-range').addEventListener('change', renderCashflow);
+    document.addEventListener('change', (e)=>{
+      if(e.target && e.target.id==='cashflow-range'){
+        state.cashflowRange = Number(e.target.value) || 30;
+        renderCashflow();
+      }
+    });
     renderAll();
     checkBackupReminder();
   }catch(err){
