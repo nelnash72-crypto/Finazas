@@ -2719,7 +2719,7 @@ function renderQuickAdd(){
   document.getElementById('qk-date').value = document.getElementById('qk-date').value || todayISO();
   renderQkDateChips();
 }
-const QK_CATEGORY_LIMIT = 6;
+const QK_CATEGORY_LIMIT = 7;
 function renderQkCategoryGrid(){
   const allCats = sortedCategories(state.qkType);
   const expanded = state.qkCategoryExpanded || allCats.length <= QK_CATEGORY_LIMIT;
