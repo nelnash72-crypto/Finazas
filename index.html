@@ -182,6 +182,15 @@
       </div>
 
       <div class="card">
+        <div class="section-title">Ingreso mensual <span class="muted">Opcional, para presupuestos en %</span></div>
+        <div class="settings-desc" style="margin-bottom:12px;">Si lo declaras, puedes fijar categorías y metas como un % de este ingreso en vez de un monto fijo — se recalculan solas si tu ingreso cambia.</div>
+        <div style="display:flex; gap:8px; align-items:flex-end;">
+          <div class="field" style="flex:1;"><label>Ingreso mensual</label><input type="number" id="monthly-income-input" min="0" step="1" placeholder="0"></div>
+          <button class="btn-secondary" id="save-monthly-income">Guardar</button>
+        </div>
+      </div>
+
+      <div class="card">
         <div class="section-title">Límites de presupuesto <span class="muted">En tu moneda base · deja en 0 para no fijar límite</span></div>
         <div id="presupuestos-edit"></div>
         <button class="btn-primary" id="save-budgets">Guardar límites</button>
@@ -382,6 +391,16 @@
       <div class="field"><label>Nombre</label><input type="text" id="goal-name" placeholder="Ej. Fondo de emergencia" required></div>
       <div class="field"><label>Objetivo</label><input type="number" id="goal-target" step="0.01" min="0" placeholder="0,00" required></div>
       <div class="field"><label>Fecha límite</label><input type="date" id="goal-date"></div>
+      <div class="field">
+        <label>Aporte mensual objetivo <span class="muted">opcional</span></label>
+        <div style="display:flex; gap:6px;">
+          <input type="number" id="goal-monthly-value" step="0.01" min="0" placeholder="0" style="flex:1;">
+          <select id="goal-monthly-mode" style="font-family:var(--font-body); font-size:13px; border:1px solid var(--rule-strong); border-radius:8px; padding:0 8px; background:var(--paper);">
+            <option value="fixed">€</option>
+            <option value="percent">% sueldo</option>
+          </select>
+        </div>
+      </div>
       <button type="submit" class="btn-primary" style="grid-column:1/-1;">+ Crear meta</button>
     </form>
   </div>

@@ -198,7 +198,15 @@ async function loadAll(){
   state.categories = categories;
   state.transactions = transactions.sort((a,b)=> b.date.localeCompare(a.date) || b.id-a.id);
   state.transfers = transfers.sort((a,b)=> b.date.localeCompare(a.date) || b.id-a.id);
-  state.budgets = {}; budgets.forEach(b=> state.budgets[b.categoryId] = b.limit);
+  const incomeSetting = settings.find(s=>s.key==='monthlyIncome');
+  state.monthlyIncome = incomeSetting ? incomeSetting.value : 0;
+  state.budgetConfig = {}; state.budgets = {};
+  budgets.forEach(b=>{
+    const mode = b.mode || 'fixed';
+    const value = (b.value !== undefined) ? b.value : (b.limit || 0);
+    state.budgetConfig[b.categoryId] = {mode, value};
+    state.budgets[b.categoryId] = mode==='percent' ? (value/100) * state.monthlyIncome : value;
+  });
   const baseSetting = settings.find(s=>s.key==='baseCurrency');
   if(baseSetting) state.baseCurrency = baseSetting.value;
   const rateSetting = settings.find(s=>s.key==='rateOverrides');
@@ -329,6 +337,9 @@ function populateDebtSelect(selectEl, kind, mode){
 function getCategory(id){ return state.categories.find(c=>c.id===id); }
 function sortedCategories(kind){
   return state.categories.filter(c=>c.kind===kind).sort((a,b)=> (a.order??a.id) - (b.order??b.id));
+}
+function sortedAccounts(){
+  return state.accounts.slice().sort((a,b)=> (a.order??a.id) - (b.order??b.id));
 }
 async function moveCategory(id, dir){
   const cat = getCategory(id);
@@ -673,7 +684,7 @@ function renderResumen(){
     renderBalanceTrend();
     const miniEl = document.getElementById('accounts-mini');
     miniEl.innerHTML = '';
-    state.accounts.filter(a => includeHidden || a.visible !== false).forEach(a=>{
+    sortedAccounts().filter(a => includeHidden || a.visible !== false).forEach(a=>{
       const row = document.createElement('div');
       row.className = 'acct-mini-row';
       row.innerHTML = `<span class="name">${escapeHtml(a.name)} ${a.visible===false?'<span style="color:var(--text-faint); font-weight:400;">(oculta)</span>':''}</span><span class="amt">${fmtMoney(accountBalance(a.id), a.currency)}</span>`;
@@ -1148,7 +1159,7 @@ function budgetRowEl(name, spent, limit, categoryId){
 
 function goToBudgetEdit(categoryId){
   document.querySelectorAll('.nav-btn[data-view="presupuestos"]')[0].click();
-  const input = document.querySelector(`[data-budget-cat="${categoryId}"]`);
+  const input = document.querySelector(`[data-budget-value="${categoryId}"]`);
   if(!input) return;
   input.scrollIntoView({behavior:'smooth', block:'center'});
   input.focus();
@@ -1316,7 +1327,7 @@ function renderMovimientos(){
   populateSubcategorySelect();
   populateDebtSelect(document.getElementById('tx-debt'), state.txType);
 
-  document.getElementById('filter-account').innerHTML = '<option value="all">Todas las cuentas</option>' + state.accounts.map(a=>`<option value="${a.id}">${escapeHtml(a.name)}</option>`).join('');
+  document.getElementById('filter-account').innerHTML = '<option value="all">Todas las cuentas</option>' + sortedAccounts().map(a=>`<option value="${a.id}">${escapeHtml(a.name)}</option>`).join('');
   const allCats = state.categories.map(c=>`<option value="${c.id}">${catIcon(c)} ${escapeHtml(c.name)} (${c.kind==='expense'?'gasto':'ingreso'})</option>`).join('');
   document.getElementById('filter-category').innerHTML = '<option value="all">Todas las categorías</option>' + allCats;
 
@@ -1325,7 +1336,7 @@ function renderMovimientos(){
 }
 
 function populateAccountSelects(){
-  const opts = state.accounts.map(a=>`<option value="${a.id}">${escapeHtml(a.name)} — ${fmtMoney(accountBalance(a.id), a.currency)}</option>`).join('');
+  const opts = sortedAccounts().map(a=>`<option value="${a.id}">${escapeHtml(a.name)} — ${fmtMoney(accountBalance(a.id), a.currency)}</option>`).join('');
   const defaultId = getDefaultAccountId();
   ['tx-account','tr-from','tr-to','qk-account','qk-tr-from','qk-tr-to'].forEach(id=>{
     const sel = document.getElementById(id);
@@ -1462,7 +1473,7 @@ function renderCuentas(){
             ${isCard ? `
               <div class="field"><label>Día de corte <span class="muted">opcional</span></label><input type="number" min="1" max="31" data-acct-edit-cutoff="${a.id}" value="${a.cutoffDay||''}" placeholder="Ej. 15"></div>
               <div class="field"><label>Día de pago mensual</label><input type="number" min="1" max="31" data-acct-edit-payday="${a.id}" value="${a.paymentDay||''}" placeholder="Ej. 15"></div>
-              <div class="field"><label>Débito automático desde</label><select data-acct-edit-autopay="${a.id}"><option value="">Sin débito automático</option>${state.accounts.filter(x=>x.id!==a.id && x.type!=='tarjeta_credito').map(x=>`<option value="${x.id}" ${x.id===a.autopayAccountId?'selected':''}>${escapeHtml(x.name)} (${x.currency})</option>`).join('')}</select></div>
+              <div class="field"><label>Débito automático desde</label><select data-acct-edit-autopay="${a.id}"><option value="">Sin débito automático</option>${sortedAccounts().filter(x=>x.id!==a.id && x.type!=='tarjeta_credito').map(x=>`<option value="${x.id}" ${x.id===a.autopayAccountId?'selected':''}>${escapeHtml(x.name)} (${x.currency})</option>`).join('')}</select></div>
             ` : ''}
           </div>
           <div style="display:flex; gap:8px;">
@@ -1479,7 +1490,7 @@ function renderCuentas(){
   const autopaySel = document.getElementById('acc-card-autopay');
   if(autopaySel){
     const prevAutopay = autopaySel.value;
-    autopaySel.innerHTML = '<option value="">Sin débito automático</option>' + state.accounts.filter(x=>x.type!=='tarjeta_credito').map(x=>`<option value="${x.id}">${escapeHtml(x.name)} (${x.currency})</option>`).join('');
+    autopaySel.innerHTML = '<option value="">Sin débito automático</option>' + sortedAccounts().filter(x=>x.type!=='tarjeta_credito').map(x=>`<option value="${x.id}">${escapeHtml(x.name)} (${x.currency})</option>`).join('');
     if(prevAutopay) autopaySel.value = prevAutopay;
   }
 }
@@ -1511,6 +1522,9 @@ function renderPresupuestos(){
 
   renderGeneralBudget(monthExpenses, undefined, computeMonthFixedProjection(mStart, mEnd));
 
+  const incomeInput = document.getElementById('monthly-income-input');
+  if(incomeInput && document.activeElement !== incomeInput) incomeInput.value = state.monthlyIncome || '';
+
   const expenseCats = sortedCategories('expense');
 
   const progEl = document.getElementById('presupuestos-progress');
@@ -1523,9 +1537,23 @@ function renderPresupuestos(){
   }
 
   const editEl = document.getElementById('presupuestos-edit');
-  editEl.innerHTML = expenseCats.map(c=>`
-    <div class="rate-row"><label>${catIcon(c)} ${escapeHtml(c.name)}</label><input type="number" min="0" step="1" data-budget-cat="${c.id}" value="${state.budgets[c.id]||''}" placeholder="0"></div>
-  `).join('');
+  editEl.innerHTML = expenseCats.map(c=>{
+    const cfg = state.budgetConfig[c.id] || {mode:'fixed', value:0};
+    const resolved = state.budgets[c.id] || 0;
+    return `
+    <div class="rate-row" style="flex-wrap:wrap; row-gap:6px;">
+      <label style="flex:1 1 140px;">${catIcon(c)} ${escapeHtml(c.name)}</label>
+      <div style="display:flex; align-items:center; gap:6px;">
+        <input type="number" min="0" step="0.1" data-budget-value="${c.id}" value="${cfg.value||''}" placeholder="0" style="width:76px;">
+        <select data-budget-mode="${c.id}" style="font-family:var(--font-body); font-size:12.5px; font-weight:500; border:1px solid var(--rule-strong); border-radius:7px; padding:5px 6px; background:var(--paper);">
+          <option value="fixed" ${cfg.mode==='fixed'?'selected':''}>€</option>
+          <option value="percent" ${cfg.mode==='percent'?'selected':''}>% sueldo</option>
+        </select>
+        ${cfg.mode==='percent' ? `<span class="muted" style="font-size:11px; white-space:nowrap;">≈ ${fmtMoney(resolved)}</span>` : ''}
+      </div>
+    </div>
+  `;
+  }).join('');
 
   renderCategoriesEditor('cats-expense', 'expense');
   renderCategoriesEditor('cats-income', 'income');
@@ -1564,6 +1592,10 @@ function renderMas(){
   } else {
     state.goals.forEach(g=>{
       const pct = g.targetAmount>0 ? Math.min(100, (g.savedAmount||0)/g.targetAmount*100) : 0;
+      const monthlyResolved = g.monthlyTargetMode==='percent' ? (g.monthlyTargetValue/100)*state.monthlyIncome : (g.monthlyTargetMode==='fixed' ? g.monthlyTargetValue : 0);
+      const monthlyLabel = g.monthlyTargetMode==='percent'
+        ? `Aporte mensual objetivo: ${g.monthlyTargetValue}% de tu sueldo (≈ ${fmtMoney(monthlyResolved||0)}/mes)`
+        : (g.monthlyTargetMode==='fixed' ? `Aporte mensual objetivo: ${fmtMoney(g.monthlyTargetValue)}/mes` : '');
       const div = document.createElement('div');
       div.className = 'budget-row';
       div.innerHTML = `
@@ -1572,6 +1604,7 @@ function renderMas(){
           <div class="budget-nums">${fmtMoney(g.savedAmount||0)} / ${fmtMoney(g.targetAmount)}</div>
         </div>
         <div class="budget-track"><div class="budget-fill" style="width:${pct}%"></div></div>
+        ${monthlyLabel ? `<div class="stat-sub" style="margin-top:6px;">${monthlyLabel}</div>` : ''}
         <div style="display:flex; gap:8px; margin-top:8px;">
           <button class="btn-secondary btn-sm" data-goal-add="${g.id}">+ Añadir aporte</button>
           <button class="btn-secondary btn-sm" data-goal-edit-toggle="${g.id}">✎ Editar</button>
@@ -1583,6 +1616,16 @@ function renderMas(){
             <div class="field"><label>Objetivo</label><input type="number" step="0.01" min="0" data-goal-edit-target="${g.id}" value="${g.targetAmount}"></div>
             <div class="field"><label>Ahorrado</label><input type="number" step="0.01" min="0" data-goal-edit-saved="${g.id}" value="${g.savedAmount||0}"></div>
             <div class="field"><label>Fecha límite</label><input type="date" data-goal-edit-date="${g.id}" value="${g.targetDate||''}"></div>
+            <div class="field">
+              <label>Aporte mensual objetivo <span class="muted">opcional</span></label>
+              <div style="display:flex; gap:6px;">
+                <input type="number" step="0.01" min="0" data-goal-edit-monthly-value="${g.id}" value="${g.monthlyTargetValue||''}" placeholder="0" style="flex:1;">
+                <select data-goal-edit-monthly-mode="${g.id}" style="font-family:var(--font-body); font-size:13px; border:1px solid var(--rule-strong); border-radius:8px; padding:0 8px; background:var(--paper);">
+                  <option value="fixed" ${(g.monthlyTargetMode||'fixed')==='fixed'?'selected':''}>€</option>
+                  <option value="percent" ${g.monthlyTargetMode==='percent'?'selected':''}>% sueldo</option>
+                </select>
+              </div>
+            </div>
           </div>
           <div style="display:flex; gap:8px;">
             <button class="btn-secondary btn-sm" data-goal-edit-save="${g.id}">Guardar</button>
@@ -1600,7 +1643,7 @@ function renderMas(){
   populateDebtSelect(document.getElementById('rec-debt'), recTypeNow);
   const recAccSel = document.getElementById('rec-account');
   const prevRecAcc = recAccSel.value;
-  const accOptsWithBalance = state.accounts.map(a=>`<option value="${a.id}">${escapeHtml(a.name)} — ${fmtMoney(accountBalance(a.id), a.currency)}</option>`).join('');
+  const accOptsWithBalance = sortedAccounts().map(a=>`<option value="${a.id}">${escapeHtml(a.name)} — ${fmtMoney(accountBalance(a.id), a.currency)}</option>`).join('');
   recAccSel.innerHTML = accOptsWithBalance;
   if(prevRecAcc) recAccSel.value = prevRecAcc;
   ['rec-tr-from','rec-tr-to'].forEach(id=>{
@@ -1637,8 +1680,8 @@ function renderMas(){
           </div>
           <div class="acct-edit-row" id="rec-edit-${r.id}" style="display:none; flex-direction:column; gap:10px;">
             <div class="form-grid">
-              <div class="field"><label>Cuenta origen</label><select data-rec-edit-tr-from="${r.id}">${state.accounts.map(a=>`<option value="${a.id}" ${a.id===r.fromAccountId?'selected':''}>${escapeHtml(a.name)} (${a.currency})</option>`).join('')}</select></div>
-              <div class="field"><label>Cuenta destino</label><select data-rec-edit-tr-to="${r.id}">${state.accounts.map(a=>`<option value="${a.id}" ${a.id===r.toAccountId?'selected':''}>${escapeHtml(a.name)} (${a.currency})</option>`).join('')}</select></div>
+              <div class="field"><label>Cuenta origen</label><select data-rec-edit-tr-from="${r.id}">${sortedAccounts().map(a=>`<option value="${a.id}" ${a.id===r.fromAccountId?'selected':''}>${escapeHtml(a.name)} (${a.currency})</option>`).join('')}</select></div>
+              <div class="field"><label>Cuenta destino</label><select data-rec-edit-tr-to="${r.id}">${sortedAccounts().map(a=>`<option value="${a.id}" ${a.id===r.toAccountId?'selected':''}>${escapeHtml(a.name)} (${a.currency})</option>`).join('')}</select></div>
               <div class="field"><label>Importe enviado</label><input type="number" step="0.01" min="0" data-rec-edit-tr-amount-from="${r.id}" value="${r.fromAmount}"></div>
               <div class="field"><label>Importe recibido</label><input type="number" step="0.01" min="0" data-rec-edit-tr-amount-to="${r.id}" value="${r.toAmount}"></div>
               <div class="field"><label>Frecuencia</label><select data-rec-edit-tr-frequency="${r.id}">${['weekly','monthly','yearly'].map(f=>`<option value="${f}" ${f===r.frequency?'selected':''}>${({weekly:'Semanal',monthly:'Mensual',yearly:'Anual'})[f]}</option>`).join('')}</select></div>
@@ -1670,7 +1713,7 @@ function renderMas(){
         </div>
         <div class="acct-edit-row" id="rec-edit-${r.id}" style="display:none; flex-direction:column; gap:10px;">
           <div class="form-grid">
-            <div class="field"><label>Cuenta</label><select data-rec-edit-account="${r.id}">${state.accounts.map(a=>`<option value="${a.id}" ${a.id===r.accountId?'selected':''}>${escapeHtml(a.name)} (${a.currency})</option>`).join('')}</select></div>
+            <div class="field"><label>Cuenta</label><select data-rec-edit-account="${r.id}">${sortedAccounts().map(a=>`<option value="${a.id}" ${a.id===r.accountId?'selected':''}>${escapeHtml(a.name)} (${a.currency})</option>`).join('')}</select></div>
             <div class="field"><label>Importe</label><input type="number" step="0.01" min="0" data-rec-edit-amount="${r.id}" value="${r.amount}"></div>
             <div class="field"><label>Categoría</label><select data-rec-edit-category="${r.id}">${sortedCategories(r.kind).map(c=>`<option value="${c.id}" ${c.id===r.categoryId?'selected':''}>${catIcon(c)} ${escapeHtml(c.name)}</option>`).join('')}</select></div>
             <div class="field"><label>Frecuencia</label><select data-rec-edit-frequency="${r.id}">${['weekly','monthly','yearly'].map(f=>`<option value="${f}" ${f===r.frequency?'selected':''}>${({weekly:'Semanal',monthly:'Mensual',yearly:'Anual'})[f]}</option>`).join('')}</select></div>
@@ -1772,7 +1815,7 @@ function renderMas(){
   // Compras a plazos
   const instAccSel = document.getElementById('inst-account');
   const prevInstAcc = instAccSel.value;
-  instAccSel.innerHTML = state.accounts.map(a=>`<option value="${a.id}">${escapeHtml(a.name)} (${a.currency})</option>`).join('');
+  instAccSel.innerHTML = sortedAccounts().map(a=>`<option value="${a.id}">${escapeHtml(a.name)} (${a.currency})</option>`).join('');
   if(prevInstAcc) instAccSel.value = prevInstAcc;
   populateCategorySelect(document.getElementById('inst-category'), 'expense');
   populateDebtSelect(document.getElementById('inst-debt'), 'expense');
@@ -1807,7 +1850,7 @@ function renderMas(){
         <div class="acct-edit-row" id="inst-edit-${it.id}" style="display:none; flex-direction:column; gap:10px; margin-top:12px; padding-top:12px; border-top:1px solid var(--rule);">
           <div class="form-grid">
             <div class="field"><label>Nombre</label><input type="text" data-inst-edit-name="${it.id}" value="${escapeHtml(it.name)}"></div>
-            <div class="field"><label>Cuenta</label><select data-inst-edit-account="${it.id}">${state.accounts.map(a=>`<option value="${a.id}" ${a.id===it.accountId?'selected':''}>${escapeHtml(a.name)} (${a.currency})</option>`).join('')}</select></div>
+            <div class="field"><label>Cuenta</label><select data-inst-edit-account="${it.id}">${sortedAccounts().map(a=>`<option value="${a.id}" ${a.id===it.accountId?'selected':''}>${escapeHtml(a.name)} (${a.currency})</option>`).join('')}</select></div>
             <div class="field"><label>Cuota actual/próxima</label><input type="number" step="0.01" min="0" data-inst-edit-amount="${it.id}" value="${installmentAmountFor(it, it.paidInstallments)}"></div>
             <div class="field"><label>Monto total restante <span class="muted">opcional, recalcula las cuotas futuras por igual</span></label><input type="number" step="0.01" min="0" data-inst-edit-remaining="${it.id}" placeholder="Dejar en blanco para no recalcular"></div>
             <div class="field"><label>Número de cuotas</label><input type="number" min="1" step="1" data-inst-edit-total="${it.id}" value="${it.totalInstallments}"></div>
@@ -1950,7 +1993,7 @@ function setupShortcuts(){
 
   document.getElementById('open-shortcut-modal').addEventListener('click', ()=>{
     const accSel = document.getElementById('shortcut-account');
-    accSel.innerHTML = state.accounts.map(a=>`<option value="${a.id}">${escapeHtml(a.name)} (${a.currency})</option>`).join('');
+    accSel.innerHTML = sortedAccounts().map(a=>`<option value="${a.id}">${escapeHtml(a.name)} (${a.currency})</option>`).join('');
     populateCategorySelect(document.getElementById('shortcut-category'), shortcutType);
     document.getElementById('shortcut-modal-overlay').style.display = 'flex';
     pushOverlayState();
@@ -2003,9 +2046,17 @@ function setupGoals(){
     const name = document.getElementById('goal-name').value.trim();
     const targetAmount = parseFloat(document.getElementById('goal-target').value);
     if(!name || !targetAmount || targetAmount<=0) return;
-    await idb.put('goals', {name, targetAmount, savedAmount:0, targetDate: document.getElementById('goal-date').value || null});
+    const monthlyValue = parseFloat(document.getElementById('goal-monthly-value').value) || 0;
+    const monthlyMode = document.getElementById('goal-monthly-mode').value;
+    await idb.put('goals', {
+      name, targetAmount, savedAmount:0,
+      targetDate: document.getElementById('goal-date').value || null,
+      monthlyTargetMode: monthlyValue>0 ? monthlyMode : null,
+      monthlyTargetValue: monthlyValue>0 ? monthlyValue : null
+    });
     await loadAll(); renderAll();
     document.getElementById('goal-name').value=''; document.getElementById('goal-target').value=''; document.getElementById('goal-date').value='';
+    document.getElementById('goal-monthly-value').value=''; document.getElementById('goal-monthly-mode').value='fixed';
     closeMasModal('goal-modal-overlay');
     toast('Meta creada');
   });
@@ -2048,8 +2099,13 @@ function setupGoals(){
       const targetAmount = parseFloat(document.querySelector(`[data-goal-edit-target="${id}"]`).value);
       const savedAmount = parseFloat(document.querySelector(`[data-goal-edit-saved="${id}"]`).value) || 0;
       const targetDate = document.querySelector(`[data-goal-edit-date="${id}"]`).value || null;
+      const monthlyValue = parseFloat(document.querySelector(`[data-goal-edit-monthly-value="${id}"]`).value) || 0;
+      const monthlyMode = document.querySelector(`[data-goal-edit-monthly-mode="${id}"]`).value;
       if(!name || !targetAmount || targetAmount<=0){ toast('Revisa los datos'); return; }
-      await idb.put('goals', {...goal, name, targetAmount, savedAmount, targetDate});
+      await idb.put('goals', {...goal, name, targetAmount, savedAmount, targetDate,
+        monthlyTargetMode: monthlyValue>0 ? monthlyMode : null,
+        monthlyTargetValue: monthlyValue>0 ? monthlyValue : null
+      });
       await loadAll(); renderAll();
       toast('Meta actualizada');
       return;
@@ -3166,11 +3222,21 @@ function setupBudgets(){
     toast('Presupuesto general guardado');
   });
 
+  document.getElementById('save-monthly-income').addEventListener('click', async ()=>{
+    const val = parseFloat(document.getElementById('monthly-income-input').value) || 0;
+    await idb.put('settings', {key:'monthlyIncome', value:val});
+    await loadAll(); renderAll();
+    toast('Ingreso mensual guardado');
+  });
+
   document.getElementById('save-budgets').addEventListener('click', async ()=>{
-    const inputs = document.querySelectorAll('[data-budget-cat]');
-    for(const inp of inputs){
-      const limit = parseFloat(inp.value) || 0;
-      await idb.put('budgets', {categoryId: Number(inp.dataset.budgetCat), limit});
+    const valueInputs = document.querySelectorAll('[data-budget-value]');
+    for(const inp of valueInputs){
+      const catId = Number(inp.dataset.budgetValue);
+      const value = parseFloat(inp.value) || 0;
+      const modeSel = document.querySelector(`[data-budget-mode="${catId}"]`);
+      const mode = modeSel ? modeSel.value : 'fixed';
+      await idb.put('budgets', {categoryId: catId, mode, value});
     }
     await loadAll(); renderAll();
     toast('Límites guardados');
