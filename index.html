@@ -96,6 +96,7 @@
               <div class="field"><label>Importe enviado</label><input type="number" id="tr-amount-from" step="0.01" min="0" placeholder="0,00"></div>
               <div class="field"><label>Importe recibido</label><input type="number" id="tr-amount-to" step="0.01" min="0" placeholder="0,00"></div>
               <div class="field"><label>Fecha</label><input type="date" id="tr-date"></div>
+              <div class="field"><label>Categoría <span class="muted">opcional</span></label><select id="tr-category"><option value="">Sin categoría</option></select></div>
               <div class="field"><label>Nota</label><input type="text" id="tr-note" placeholder="Opcional"></div>
             </div>
           </div>
@@ -197,6 +198,14 @@
       </div>
 
       <div class="card">
+        <div class="section-title">Ahorro / Inversión <span class="muted">Transferencias categorizadas, no cuentan como gasto</span></div>
+        <div class="settings-desc" style="margin-bottom:12px;">Categoriza tus transferencias de ahorro o inversión (ej. a tu cuenta de ahorros) y fíjales un objetivo mensual en € o en % de tu sueldo. Como son transferencias, no afectan tu presupuesto de gastos ni tu patrimonio total — solo mueven el dinero de cuenta.</div>
+        <div id="transfer-budget-progress" style="margin-bottom:14px;"></div>
+        <div id="transfer-budget-edit"></div>
+        <button class="btn-primary" id="save-transfer-budgets">Guardar objetivos</button>
+      </div>
+
+      <div class="card">
         <div class="section-title">Categorías de gasto</div>
         <div id="cats-expense"></div>
         <button class="btn-secondary btn-sm" id="add-cat-expense" style="margin-top:6px;">+ Nueva categoría de gasto</button>
@@ -206,6 +215,12 @@
         <div class="section-title">Categorías de ingreso</div>
         <div id="cats-income"></div>
         <button class="btn-secondary btn-sm" id="add-cat-income" style="margin-top:6px;">+ Nueva categoría de ingreso</button>
+      </div>
+
+      <div class="card">
+        <div class="section-title">Categorías de transferencia <span class="muted">Ej. Ahorro, Inversión</span></div>
+        <div id="cats-transfer"></div>
+        <button class="btn-secondary btn-sm" id="add-cat-transfer" style="margin-top:6px;">+ Nueva categoría de transferencia</button>
       </div>
     </section>
 
@@ -374,6 +389,7 @@
         <div class="field"><label>Cuenta destino</label><select id="qk-tr-to"></select></div>
         <div class="field"><label>Importe enviado</label><input type="number" id="qk-tr-amount-from" step="0.01" min="0" placeholder="0,00"></div>
         <div class="field"><label>Importe recibido</label><input type="number" id="qk-tr-amount-to" step="0.01" min="0" placeholder="0,00"></div>
+        <div class="field"><label>Categoría <span class="muted">opcional</span></label><select id="qk-tr-category"><option value="">Sin categoría</option></select></div>
       </div>
       <div class="field"><label>Nota</label><input type="text" id="qk-note" placeholder="Opcional"></div>
       <button type="submit" class="btn-primary">Guardar</button>

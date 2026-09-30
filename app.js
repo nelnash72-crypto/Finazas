@@ -403,9 +403,13 @@ async function generateDueRecurring(){
     let changed = false;
     while(next && next <= today && iterations < 36){
       if(r.isTransfer){
-        await idb.put('transfers', {fromAccountId:r.fromAccountId, toAccountId:r.toAccountId, fromAmount:r.fromAmount, toAmount:r.toAmount, date:next, note:(r.note ? r.note+' · ' : '')+'Recurrente'});
+        const transferRecord = {fromAccountId:r.fromAccountId, toAccountId:r.toAccountId, fromAmount:r.fromAmount, toAmount:r.toAmount, date:next, note:(r.note ? r.note+' · ' : '')+'Recurrente'};
+        transferRecord.id = await idb.put('transfers', transferRecord);
+        state.transfers.push(transferRecord);
       } else {
-        await idb.put('transactions', {accountId:r.accountId, kind:r.kind, amount:r.amount, categoryId:r.categoryId, subcategory:r.subcategory||'', date:next, note:(r.note ? r.note+' · ' : '')+'Recurrente', debtId:r.debtId||null, debtEffect:r.debtId?(r.debtEffect||'payment'):null, source:'recurring'});
+        const txRecord = {accountId:r.accountId, kind:r.kind, amount:r.amount, categoryId:r.categoryId, subcategory:r.subcategory||'', date:next, note:(r.note ? r.note+' · ' : '')+'Recurrente', debtId:r.debtId||null, debtEffect:r.debtId?(r.debtEffect||'payment'):null, source:'recurring'};
+        txRecord.id = await idb.put('transactions', txRecord);
+        state.transactions.push(txRecord);
         if(r.debtId) await applyDebtEffect(r.debtId, r.debtEffect||'payment', r.amount);
       }
       r.lastGenerated = next;
@@ -428,7 +432,9 @@ async function generateDueInstallments(){
     while(next && next <= today && it.paidInstallments < it.totalInstallments && iterations < 36){
       const cuotaAmount = installmentAmountFor(it, it.paidInstallments);
       it.paidInstallments++;
-      await idb.put('transactions', {accountId:it.accountId, kind:'expense', amount:cuotaAmount, categoryId:it.categoryId, subcategory:it.subcategory||'', date:next, note:`${it.name} · Cuota ${it.paidInstallments}/${it.totalInstallments}`, debtId:it.debtId||null, source:'installment'});
+      const txRecord = {accountId:it.accountId, kind:'expense', amount:cuotaAmount, categoryId:it.categoryId, subcategory:it.subcategory||'', date:next, note:`${it.name} · Cuota ${it.paidInstallments}/${it.totalInstallments}`, debtId:it.debtId||null, source:'installment'};
+      txRecord.id = await idb.put('transactions', txRecord);
+      state.transactions.push(txRecord);
       if(it.debtId) await applyDebtPayment(it.debtId, cuotaAmount);
       it.lastGenerated = next;
       next = nextRecurringDate(next, 'monthly');
@@ -502,7 +508,7 @@ async function generateDueCardPayments(){
         const crossRate = effectiveRate(fromAcc.currency) / effectiveRate(a.currency);
         const fromAmount = Math.round((used / crossRate) * 100) / 100;
         const transferRecord = {fromAccountId:a.autopayAccountId, toAccountId:a.id, fromAmount, toAmount:used, date:paymentDate, note:'Pago automático tarjeta · '+a.name};
-        await idb.put('transfers', transferRecord);
+        transferRecord.id = await idb.put('transfers', transferRecord);
         state.transfers.push(transferRecord);
       }
       a.lastAutopayGenerated = nextCutoff;
@@ -1224,9 +1230,10 @@ function ledgerRowEl(item){
   row.className = 'ledger-row';
   if(item.itemType==='transfer'){
     const from = getAccount(item.fromAccountId), to = getAccount(item.toAccountId);
+    const trCat = item.categoryId ? getCategory(item.categoryId) : null;
     wrap.innerHTML = `<div class="ledger-row-actions"><button type="button" class="swipe-action edit" data-edit-transfer="${item.id}">Editar</button><button type="button" class="swipe-action delete" data-del-transfer="${item.id}">Eliminar</button></div>`;
     row.innerHTML = `
-      <div class="ledger-desc"><div class="ledger-note">${escapeHtml(item.note || 'Transferencia')}</div><div class="ledger-cat">${from?escapeHtml(from.name):'?'} → ${to?escapeHtml(to.name):'?'}</div></div>
+      <div class="ledger-desc"><div class="ledger-note">${trCat ? catIcon(trCat)+' '+escapeHtml(trCat.name) : (item.note || 'Transferencia')}</div><div class="ledger-cat">${from?escapeHtml(from.name):'?'} → ${to?escapeHtml(to.name):'?'}${trCat && item.note ? ' · '+escapeHtml(item.note) : ''}</div></div>
       <div><span class="tag transfer">Transferencia</span></div>
       <div class="ledger-amount transfer">${fmtMoney(item.fromAmount, from?from.currency:state.baseCurrency)}</div>
     `;
@@ -1326,6 +1333,7 @@ function renderMovimientos(){
   populateCategorySelect(document.getElementById('tx-category'), state.txType);
   populateSubcategorySelect();
   populateDebtSelect(document.getElementById('tx-debt'), state.txType);
+  populateTransferCategorySelects();
 
   document.getElementById('filter-account').innerHTML = '<option value="all">Todas las cuentas</option>' + sortedAccounts().map(a=>`<option value="${a.id}">${escapeHtml(a.name)}</option>`).join('');
   const allCats = state.categories.map(c=>`<option value="${c.id}">${catIcon(c)} ${escapeHtml(c.name)} (${c.kind==='expense'?'gasto':'ingreso'})</option>`).join('');
@@ -1349,6 +1357,17 @@ function populateAccountSelects(){
 function populateCategorySelect(selectEl, kind){
   const cats = sortedCategories(kind);
   selectEl.innerHTML = cats.map(c=>`<option value="${c.id}">${catIcon(c)} ${escapeHtml(c.name)}</option>`).join('');
+}
+function populateTransferCategorySelects(){
+  const cats = sortedCategories('transfer');
+  const opts = '<option value="">Sin categoría</option>' + cats.map(c=>`<option value="${c.id}">${catIcon(c)} ${escapeHtml(c.name)}</option>`).join('');
+  ['tr-category','qk-tr-category'].forEach(id=>{
+    const sel = document.getElementById(id);
+    if(!sel) return;
+    const prev = sel.value;
+    sel.innerHTML = opts;
+    if(prev) sel.value = prev;
+  });
 }
 function populateSubcategorySelect(){
   const catId = Number(document.getElementById('tx-category').value);
@@ -1540,7 +1559,43 @@ function renderPresupuestos(){
   editEl.innerHTML = expenseCats.map(c=>{
     const cfg = state.budgetConfig[c.id] || {mode:'fixed', value:0};
     const resolved = state.budgets[c.id] || 0;
-    return `
+    return budgetEditRowHtml(c, cfg, resolved);
+  }).join('');
+
+  // Ahorro / Inversión: transferencias categorizadas, tracked por separado de los gastos
+  const transferCats = sortedCategories('transfer');
+  const monthTransfers = txInRange(state.transfers, mStart, mEnd);
+  const transferByCat = {};
+  monthTransfers.forEach(t=>{
+    if(!t.categoryId) return;
+    const fromAcc = getAccount(t.fromAccountId);
+    const amt = toBase(t.fromAmount, fromAcc?fromAcc.currency:state.baseCurrency);
+    transferByCat[t.categoryId] = (transferByCat[t.categoryId]||0) + amt;
+  });
+  const trProgEl = document.getElementById('transfer-budget-progress');
+  const trEditEl = document.getElementById('transfer-budget-edit');
+  if(trProgEl && trEditEl){
+    if(transferCats.length===0){
+      trProgEl.innerHTML = '<div class="empty-note">Crea una categoría de transferencia abajo (ej. "Ahorro") para empezar.</div>';
+      trEditEl.innerHTML = '';
+    } else {
+      const activeTr = transferCats.filter(c => (state.budgets[c.id]>0) || transferByCat[c.id]);
+      trProgEl.innerHTML = activeTr.length===0 ? '<div class="empty-note">Fija objetivos abajo para ver tu progreso mensual aquí.</div>' : '';
+      activeTr.forEach(c => trProgEl.appendChild(budgetRowEl(catIcon(c)+' '+c.name, transferByCat[c.id]||0, state.budgets[c.id]||0)));
+      trEditEl.innerHTML = transferCats.map(c=>{
+        const cfg = state.budgetConfig[c.id] || {mode:'fixed', value:0};
+        const resolved = state.budgets[c.id] || 0;
+        return budgetEditRowHtml(c, cfg, resolved);
+      }).join('');
+    }
+  }
+
+  renderCategoriesEditor('cats-expense', 'expense');
+  renderCategoriesEditor('cats-income', 'income');
+  renderCategoriesEditor('cats-transfer', 'transfer');
+}
+function budgetEditRowHtml(c, cfg, resolved){
+  return `
     <div class="rate-row" style="flex-wrap:wrap; row-gap:6px;">
       <label style="flex:1 1 140px;">${catIcon(c)} ${escapeHtml(c.name)}</label>
       <div style="display:flex; align-items:center; gap:6px;">
@@ -1553,10 +1608,6 @@ function renderPresupuestos(){
       </div>
     </div>
   `;
-  }).join('');
-
-  renderCategoriesEditor('cats-expense', 'expense');
-  renderCategoriesEditor('cats-income', 'income');
 }
 
 function renderCategoriesEditor(containerId, kind){
@@ -2636,7 +2687,8 @@ function setupTxForm(){
       const toAmount = parseFloat(document.getElementById('tr-amount-to').value);
       if(!fromId || !toId || fromId===toId){ toast('Elige dos cuentas distintas'); return; }
       if(!fromAmount || fromAmount<=0 || !toAmount || toAmount<=0){ toast('Introduce importes válidos'); return; }
-      const trData = {fromAccountId:fromId, toAccountId:toId, fromAmount, toAmount, date:document.getElementById('tr-date').value, note:document.getElementById('tr-note').value.trim()};
+      const catVal = document.getElementById('tr-category').value;
+      const trData = {fromAccountId:fromId, toAccountId:toId, fromAmount, toAmount, date:document.getElementById('tr-date').value, note:document.getElementById('tr-note').value.trim(), categoryId: catVal ? Number(catVal) : null};
       if(state.editingTransferId){
         trData.id = state.editingTransferId;
         await idb.put('transfers', trData);
@@ -2646,7 +2698,7 @@ function setupTxForm(){
       } else {
         await idb.put('transfers', trData);
         await loadAll(); renderAll();
-        document.getElementById('tr-amount-from').value=''; document.getElementById('tr-amount-to').value=''; document.getElementById('tr-note').value='';
+        document.getElementById('tr-amount-from').value=''; document.getElementById('tr-amount-to').value=''; document.getElementById('tr-note').value=''; document.getElementById('tr-category').value='';
         toast('Transferencia guardada');
       }
     } else {
@@ -2730,6 +2782,8 @@ function enterTransferEditMode(tr){
   document.getElementById('tr-amount-from').value = tr.fromAmount;
   document.getElementById('tr-amount-to').value = tr.toAmount;
   document.getElementById('tr-date').value = tr.date;
+  populateTransferCategorySelects();
+  document.getElementById('tr-category').value = tr.categoryId || '';
   document.getElementById('tr-note').value = tr.note || '';
   document.getElementById('tx-form-title').textContent = 'Editar transferencia';
   document.getElementById('tx-submit-btn').textContent = 'Guardar cambios';
@@ -2766,6 +2820,7 @@ function renderQuickAdd(){
   document.getElementById('qk-fields-transfer').style.display = isTransfer ? 'grid' : 'none';
   if(isTransfer){
     populateAccountSelects();
+    populateTransferCategorySelects();
   } else {
     populateCategorySelect(document.getElementById('qk-category'), state.qkType);
     populateQkSubcategory();
@@ -2837,6 +2892,7 @@ function setupQuickAdd(){
         renderQkCategoryGrid();
       } else {
         populateAccountSelects();
+        populateTransferCategorySelects();
       }
     });
   });
@@ -2900,9 +2956,10 @@ function setupQuickAdd(){
       const toAmount = parseFloat(document.getElementById('qk-tr-amount-to').value);
       if(!fromId || !toId || fromId===toId){ toast('Elige dos cuentas distintas'); return; }
       if(!fromAmount || fromAmount<=0 || !toAmount || toAmount<=0){ toast('Introduce importes válidos'); return; }
-      await idb.put('transfers', {fromAccountId:fromId, toAccountId:toId, fromAmount, toAmount, date:qkDate, note:document.getElementById('qk-note').value.trim()});
+      const catVal = document.getElementById('qk-tr-category').value;
+      await idb.put('transfers', {fromAccountId:fromId, toAccountId:toId, fromAmount, toAmount, date:qkDate, note:document.getElementById('qk-note').value.trim(), categoryId: catVal ? Number(catVal) : null});
       await loadAll(); renderAll();
-      document.getElementById('qk-tr-amount-from').value=''; document.getElementById('qk-tr-amount-to').value=''; document.getElementById('qk-note').value='';
+      document.getElementById('qk-tr-amount-from').value=''; document.getElementById('qk-tr-amount-to').value=''; document.getElementById('qk-note').value=''; document.getElementById('qk-tr-category').value='';
       closeQuickAdd();
       toast('Transferencia guardada');
       return;
@@ -3229,7 +3286,7 @@ function setupBudgets(){
     toast('Ingreso mensual guardado');
   });
 
-  document.getElementById('save-budgets').addEventListener('click', async ()=>{
+  async function saveAllBudgetInputs(){
     const valueInputs = document.querySelectorAll('[data-budget-value]');
     for(const inp of valueInputs){
       const catId = Number(inp.dataset.budgetValue);
@@ -3239,14 +3296,25 @@ function setupBudgets(){
       await idb.put('budgets', {categoryId: catId, mode, value});
     }
     await loadAll(); renderAll();
+  }
+  document.getElementById('save-budgets').addEventListener('click', async ()=>{
+    await saveAllBudgetInputs();
     toast('Límites guardados');
+  });
+  const saveTransferBtn = document.getElementById('save-transfer-budgets');
+  if(saveTransferBtn) saveTransferBtn.addEventListener('click', async ()=>{
+    await saveAllBudgetInputs();
+    toast('Objetivos guardados');
   });
 
   document.getElementById('add-cat-expense').addEventListener('click', ()=> addCategory('expense'));
   document.getElementById('add-cat-income').addEventListener('click', ()=> addCategory('income'));
+  const addCatTransferBtn = document.getElementById('add-cat-transfer');
+  if(addCatTransferBtn) addCatTransferBtn.addEventListener('click', ()=> addCategory('transfer'));
 
   async function addCategory(kind){
-    const name = prompt('Nombre de la nueva categoría de ' + (kind==='expense'?'gasto':'ingreso') + ':');
+    const kindLabel = kind==='expense' ? 'gasto' : (kind==='income' ? 'ingreso' : 'transferencia');
+    const name = prompt('Nombre de la nueva categoría de ' + kindLabel + ':');
     if(!name || !name.trim()) return;
     await idb.put('categories', {name:name.trim(), kind, subcategories:[], icon:'🏷️'});
     await loadAll(); renderAll();
