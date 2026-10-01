@@ -110,6 +110,7 @@ let state = {
   qkType:'expense',
   txDebtMode:'payment',
   qkDebtMode:'payment',
+  lastAccountId:null,
   recDebtMode:'payment',
   goals:[], recurring:[], reminders:[], debts:[], installments:[], shortcuts:[],
   lastBackupDate:null, backupReminderShown:false, editingTxId:null, editingTransferId:null, accentColor:'#A5842E', darkMode:false, textScale:100, iconPickerTarget:null, generalBudget:0,
@@ -213,6 +214,8 @@ async function loadAll(){
   if(rateSetting) state.rateOverrides = rateSetting.value || {};
   const backupSetting = settings.find(s=>s.key==='lastBackupDate');
   state.lastBackupDate = backupSetting ? backupSetting.value : null;
+  const lastAccSetting = settings.find(s=>s.key==='lastAccountId');
+  state.lastAccountId = lastAccSetting ? lastAccSetting.value : null;
   const generalBudgetSetting = settings.find(s=>s.key==='generalBudget');
   state.generalBudget = generalBudgetSetting ? generalBudgetSetting.value : 0;
   const accentSetting = settings.find(s=>s.key==='accentColor');
@@ -693,6 +696,7 @@ function renderResumen(){
     sortedAccounts().filter(a => includeHidden || a.visible !== false).forEach(a=>{
       const row = document.createElement('div');
       row.className = 'acct-mini-row';
+      row.dataset.detail = 'acct'; row.dataset.detailId = a.id; row.style.cursor = 'pointer';
       row.innerHTML = `<span class="name">${escapeHtml(a.name)} ${a.visible===false?'<span style="color:var(--text-faint); font-weight:400;">(oculta)</span>':''}</span><span class="amt">${fmtMoney(accountBalance(a.id), a.currency)}</span>`;
       miniEl.appendChild(row);
     });
@@ -817,12 +821,12 @@ const RESUMEN_BLOCK_HTML = {
       <div class="section-title">Ingresos y gastos</div>
       <div class="period-bar" id="resumen-period"></div>
       <div class="grid-3" style="margin-bottom:22px;">
-        <div>
+        <div data-detail="pinc" style="cursor:pointer;">
           <div class="stat-label">Ingresos</div>
           <div class="stat-num income" id="stat-income">€0,00</div>
           <div class="stat-sub" id="stat-income-count"></div>
         </div>
-        <div>
+        <div data-detail="pexp" style="cursor:pointer;">
           <div class="stat-label">Gastos</div>
           <div class="stat-num expense" id="stat-expense">€0,00</div>
           <div class="stat-sub" id="stat-expense-count"></div>
@@ -840,6 +844,8 @@ const RESUMEN_BLOCK_HTML = {
       <div class="section-title">Proyección de flujo de caja <select id="cashflow-range" style="font-family:var(--font-body); font-size:12.5px; font-weight:500; border:1px solid var(--rule-strong); border-radius:7px; padding:5px 8px; background:var(--paper);">
         <option value="30" __SEL30__>Próximos 30 días</option>
         <option value="60" __SEL60__>Próximos 60 días</option>
+        <option value="month" __SELMONTH__>Mes actual (lo que falta)</option>
+        <option value="next" __SELNEXT__>Mes siguiente</option>
       </select></div>
       <div class="stat-sub" id="cashflow-total" style="margin-bottom:10px;"></div>
       <div id="cashflow-list"></div>
@@ -864,11 +870,11 @@ function renderResumenBlocksContainer(){
   const container = document.getElementById('resumen-blocks');
   if(!container) return;
   const layout = getResumenLayout();
-  const range = state.cashflowRange || 30;
+  const range = String(state.cashflowRange || 30);
   container.innerHTML = layout.filter(b=>b.visible).map(b=>{
     let html = RESUMEN_BLOCK_HTML[b.id];
     if(b.id==='flujo-caja'){
-      html = html.replace('__SEL30__', range===30 ? 'selected' : '').replace('__SEL60__', range===60 ? 'selected' : '');
+      html = html.replace('__SEL30__', range==='30' ? 'selected' : '').replace('__SEL60__', range==='60' ? 'selected' : '').replace('__SELMONTH__', range==='month' ? 'selected' : '').replace('__SELNEXT__', range==='next' ? 'selected' : '');
     }
     return html;
   }).join('');
@@ -1009,14 +1015,24 @@ function computeMonthFixedProjection(monthStart, monthEnd){
   });
   return total;
 }
-function computeCashflowProjection(days){
+function cashflowWindow(range){
   const today = todayISO();
-  const endD = new Date(today+"T00:00:00"); endD.setDate(endD.getDate()+days);
-  const toDate = toISO(endD);
+  const td = new Date(today+"T00:00:00");
+  if(range==='month'){
+    return {from: today, to: toISO(new Date(td.getFullYear(), td.getMonth()+1, 0))};
+  }
+  if(range==='next'){
+    return {from: toISO(new Date(td.getFullYear(), td.getMonth()+1, 1)), to: toISO(new Date(td.getFullYear(), td.getMonth()+2, 0))};
+  }
+  const endD = new Date(today+"T00:00:00"); endD.setDate(endD.getDate()+(Number(range)||30));
+  return {from: today, to: toISO(endD)};
+}
+function computeCashflowProjection(range){
+  const {from: fromDate, to: toDate} = cashflowWindow(range);
   let items = [];
-  state.recurring.forEach(r=> items = items.concat(projectRecurringOccurrences(r, today, toDate)));
-  state.installments.forEach(it=> items = items.concat(projectInstallmentOccurrences(it, today, toDate)));
-  state.accounts.forEach(a=> items = items.concat(projectCardPaymentOccurrences(a, today, toDate)));
+  state.recurring.forEach(r=> items = items.concat(projectRecurringOccurrences(r, fromDate, toDate)));
+  state.installments.forEach(it=> items = items.concat(projectInstallmentOccurrences(it, fromDate, toDate)));
+  state.accounts.forEach(a=> items = items.concat(projectCardPaymentOccurrences(a, fromDate, toDate)));
   items.sort((x,y)=> x.date.localeCompare(y.date));
   return items;
 }
@@ -1025,8 +1041,7 @@ function renderCashflow(){
   const listEl = document.getElementById('cashflow-list');
   const totalEl = document.getElementById('cashflow-total');
   if(!sel || !listEl || !totalEl) return;
-  const days = Number(sel.value) || 30;
-  const items = computeCashflowProjection(days);
+  const items = computeCashflowProjection(sel.value || '30');
   if(items.length===0){
     listEl.innerHTML = '<div class="empty-note">Sin pagos ni ingresos comprometidos en este período.</div>';
     totalEl.textContent = '';
@@ -1064,7 +1079,7 @@ function renderNetWorth(){
   el.innerHTML = entries.map(([type,val])=>{
     const pct = Math.min(100, Math.abs(val)/maxAbs*100);
     return `
-      <div class="budget-row">
+      <div class="budget-row" data-detail="type" data-detail-type="${type}" style="cursor:pointer;">
         <div class="budget-top"><div class="budget-cat">${typeLabels[type]||cap(type)}</div><div class="budget-nums">${fmtMoney(val)}</div></div>
         <div class="budget-track"><div class="budget-fill" style="width:${pct}%; background:${val<0?'var(--over)':'var(--teal)'};"></div></div>
       </div>
@@ -1121,25 +1136,30 @@ function renderGeneralBudget(monthExpenses, elId, pendingFixed){
     const acc = getAccount(t.accountId);
     todaySpent += toBase(t.amount, acc?acc.currency:state.baseCurrency);
   });
-  const todayLeft = dailyBaseline - todaySpent;
+  // Margen de hoy según lo que realmente queda del mes (no el reparto parejo desde el día 1),
+  // así es coherente con el "diario libre" cuando ya te pasaste del límite.
+  const spentBeforeToday = Math.max(0, variableTotal - todaySpent);
+  const todayAllowance = (freeForVariables - spentBeforeToday) / daysRemaining;
+  const noMarginToday = todayAllowance <= 0;
+  const todayLeft = todayAllowance - todaySpent;
 
   el.innerHTML = `
     <div${elId ? ' style="padding-bottom:14px; border-bottom:1px solid var(--rule);"' : ''}>
-      <div class="budget-top"><div class="budget-cat">${elId ? 'Presupuesto general' : 'Gastado este mes'}</div><div class="budget-nums">${fmtMoney(total)} / ${fmtMoney(limit)}</div></div>
+      <div class="budget-top" data-detail="all" style="cursor:pointer;" title="Ver movimientos"><div class="budget-cat">${elId ? 'Presupuesto general' : 'Gastado este mes'}</div><div class="budget-nums">${fmtMoney(total)} / ${fmtMoney(limit)}</div></div>
       <div class="budget-track"><div class="budget-fill ${over?'over':(warn?'warn':'')}" style="width:${pct}%"></div></div>
       <div class="stat-sub" style="margin-top:8px; color:${remaining<0?'var(--over)':'var(--text-soft)'};">${remaining<0 ? 'Te pasaste por '+fmtMoney(Math.abs(remaining)) : 'Te queda '+fmtMoney(remaining)}</div>
       <div style="display:flex; gap:20px; margin-top:12px;">
-        <div class="stat-sub">🔁 Fijos: <strong style="color:var(--text);">${fmtMoney(fixedTotal)}</strong>${pending>0.004 ? ` <span class="muted">(incluye ${fmtMoney(pending)} aún no facturados)</span>` : ''}</div>
-        <div class="stat-sub">✏️ Variables: <strong style="color:var(--text);">${fmtMoney(variableTotal)}</strong></div>
+        <div class="stat-sub" data-detail="fixed" style="cursor:pointer; text-decoration:underline dotted var(--rule-strong); text-underline-offset:4px;">🔁 Fijos: <strong style="color:var(--text);">${fmtMoney(fixedTotal)}</strong>${pending>0.004 ? ` <span class="muted">(incluye ${fmtMoney(pending)} aún no facturados)</span>` : ''}</div>
+        <div class="stat-sub" data-detail="variable" style="cursor:pointer; text-decoration:underline dotted var(--rule-strong); text-underline-offset:4px;">✏️ Variables: <strong style="color:var(--text);">${fmtMoney(variableTotal)}</strong></div>
       </div>
       <div style="margin-top:16px; padding-top:14px; border-top:1px solid var(--rule);">
         <div class="stat-label">Presupuesto diario libre <span class="muted" style="text-transform:none; font-weight:500;">(descontando fijos)</span></div>
         <div class="balance-num" style="font-size:26px; margin:6px 0 2px; color:${dailyRemaining<0?'var(--over)':'var(--text)'};">${fmtMoney(dailyRemaining)}<span style="font-size:14px; color:var(--text-soft); font-weight:500;"> /día</span></div>
-        <div class="stat-sub">Para los ${daysRemaining} días que quedan del mes · si lo repartes parejo desde el día 1: ${fmtMoney(dailyBaseline)}/día</div>
+        <div class="stat-sub">Para ${daysRemaining===1?'el último día':'los '+daysRemaining+' días'} que ${daysRemaining===1?'queda':'quedan'} del mes · si lo repartes parejo desde el día 1: ${fmtMoney(dailyBaseline)}/día</div>
       </div>
       <div style="margin-top:12px; padding:10px 14px; background:var(--paper); border:1px solid var(--rule); border-radius:8px; display:flex; justify-content:space-between; align-items:center;">
-        <div class="stat-sub">Hoy: gastaste <strong style="color:var(--text);">${fmtMoney(todaySpent)}</strong> de ${fmtMoney(dailyBaseline)}</div>
-        <div class="stat-sub" style="color:${todayLeft<0?'var(--over)':'var(--teal)'}; font-weight:600;">${todayLeft<0 ? 'Te pasaste '+fmtMoney(Math.abs(todayLeft)) : 'Te quedan '+fmtMoney(todayLeft)}</div>
+        <div class="stat-sub">Hoy: gastaste <strong style="color:var(--text);">${fmtMoney(todaySpent)}</strong>${noMarginToday ? '' : ' de '+fmtMoney(todayAllowance)}</div>
+        <div class="stat-sub" style="color:${(noMarginToday||todayLeft<0)?'var(--over)':'var(--teal)'}; font-weight:600;">${noMarginToday ? 'Sin margen hoy' : (todayLeft<0 ? 'Te pasaste '+fmtMoney(Math.abs(todayLeft)) : 'Te quedan '+fmtMoney(todayLeft))}</div>
       </div>
     </div>
   `;
@@ -1157,10 +1177,158 @@ function budgetRowEl(name, spent, limit, categoryId){
   `;
   if(categoryId){
     div.style.cursor = 'pointer';
-    div.title = 'Editar límite de presupuesto';
-    div.addEventListener('click', ()=> goToBudgetEdit(categoryId));
+    div.title = 'Ver movimientos de la categoría';
+    div.dataset.detail = 'cat';
+    div.dataset.detailCat = categoryId;
   }
   return div;
+}
+
+/* ================= Ventana de detalle (al tocar totales/grupos) ================= */
+let detailRequest = null;
+function monthExpensesNow(){
+  const now = new Date();
+  const mStart = toISO(startOfMonth(now)), mEnd = toISO(endOfMonth(now));
+  return {mStart, mEnd, items: txInRange(state.transactions, mStart, mEnd).filter(t=>t.kind==='expense')};
+}
+function sumBase(list){
+  let total = 0;
+  list.forEach(t=>{ const acc=getAccount(t.accountId); total += toBase(t.amount, acc?acc.currency:state.baseCurrency); });
+  return total;
+}
+function sortLedgerDesc(list){
+  return list.slice().sort((a,b)=> b.date.localeCompare(a.date) || (b.id||0)-(a.id||0));
+}
+function periodLabelText(range){
+  return range.start===range.end ? fmtDate(range.start) : fmtDate(range.start)+' – '+fmtDate(range.end);
+}
+function buildDetail(req){
+  const countText = n => `${n} ${n===1?'movimiento':'movimientos'}`;
+  const sumLine = (list, extra) => `${countText(list.length)} · Total: <strong style="color:var(--text);">${fmtMoney(sumBase(list))}</strong>${extra||''}`;
+  const typeLabels = {efectivo:'Efectivo', banco:'Banco', ahorros:'Ahorros', tarjeta_credito:'Tarjeta de crédito', otro:'Otro'};
+  let d = {title:'', summary:'', list:[], html:null, actions:''};
+
+  if(['all','fixed','variable','cat'].includes(req.type)){
+    const {mStart, mEnd, items} = monthExpensesNow();
+    const isFixed = t => t.source==='recurring' || t.source==='installment';
+    let list = items, extra = '';
+    d.title = 'Gastos del mes';
+    if(req.type==='fixed'){
+      list = items.filter(isFixed); d.title = '🔁 Gastos fijos del mes';
+      const pending = computeMonthFixedProjection(mStart, mEnd);
+      if(pending > 0.004) extra = ` · Aún sin facturar este mes: ${fmtMoney(pending)}`;
+    } else if(req.type==='variable'){
+      list = items.filter(t=>!isFixed(t)); d.title = '✏️ Gastos variables del mes';
+    } else if(req.type==='cat'){
+      const cat = getCategory(Number(req.catId));
+      list = items.filter(t=>t.categoryId===Number(req.catId));
+      d.title = cat ? catIcon(cat)+' '+escapeHtml(cat.name) : 'Categoría';
+      d.actions = `<button type="button" class="btn-secondary" data-detail-edit-budget="${req.catId}">Editar límite de presupuesto</button>`;
+    }
+    d.list = sortLedgerDesc(list); d.summary = sumLine(list, extra);
+  }
+  else if(['pcat','pexp','pinc'].includes(req.type)){
+    const range = periodRange(state.resumenPeriod);
+    const periodTx = txInRange(state.transactions, range.start, range.end);
+    let list;
+    if(req.type==='pinc'){ list = periodTx.filter(t=>t.kind==='income'); d.title = 'Ingresos del período'; }
+    else if(req.type==='pexp'){ list = periodTx.filter(t=>t.kind==='expense'); d.title = 'Gastos del período'; }
+    else {
+      const cat = getCategory(Number(req.catId));
+      list = periodTx.filter(t=>t.kind==='expense' && String(t.categoryId)===String(req.catId));
+      d.title = cat ? catIcon(cat)+' '+escapeHtml(cat.name) : 'Categoría';
+    }
+    d.list = sortLedgerDesc(list);
+    d.summary = sumLine(list, ' · '+periodLabelText(range));
+  }
+  else if(req.type==='acct'){
+    const acct = getAccount(Number(req.id));
+    if(!acct){ d.title = 'Cuenta'; d.summary = 'La cuenta ya no existe.'; return d; }
+    const id = acct.id;
+    const all = [
+      ...state.transactions.filter(t=>t.accountId===id).map(t=>({...t, itemType:'tx'})),
+      ...state.transfers.filter(t=>t.fromAccountId===id || t.toAccountId===id).map(t=>({...t, itemType:'transfer'}))
+    ];
+    const sorted = sortLedgerDesc(all);
+    const CAP = 100;
+    d.list = sorted.slice(0, CAP);
+    d.title = escapeHtml(acct.name);
+    d.summary = `Saldo actual: <strong style="color:var(--text);">${fmtMoney(accountBalance(id), acct.currency)}</strong> · ${countText(sorted.length)}${sorted.length>CAP ? ' (mostrando los '+CAP+' más recientes)' : ''}`;
+  }
+  else if(req.type==='type'){
+    const accts = sortedAccounts().filter(a=>a.type===req.acctType);
+    d.title = typeLabels[req.acctType] || cap(req.acctType);
+    let total = 0;
+    accts.forEach(a=>{ total += toBase(accountBalance(a.id), a.currency); });
+    d.summary = `${accts.length} ${accts.length===1?'cuenta':'cuentas'} · Total: <strong style="color:var(--text);">${fmtMoney(total)}</strong> <span class="muted">(toca una cuenta para ver sus movimientos)</span>`;
+    d.html = accts.length===0 ? '<div class="empty-note">Sin cuentas de este tipo.</div>' : accts.map(a=>
+      `<div class="acct-mini-row" data-detail="acct" data-detail-id="${a.id}" style="cursor:pointer;"><span class="name">${escapeHtml(a.name)}${a.visible===false?' <span style="color:var(--text-faint); font-weight:400;">(oculta)</span>':''}</span><span class="amt">${fmtMoney(accountBalance(a.id), a.currency)}</span></div>`
+    ).join('');
+  }
+  if(req.prev) d.actions = `<button type="button" class="btn-secondary" data-detail-back="1">← Volver</button> ` + d.actions;
+  return d;
+}
+function renderDetailModal(){
+  if(!detailRequest) return;
+  const d = buildDetail(detailRequest);
+  document.getElementById('detail-title').innerHTML = d.title;
+  document.getElementById('detail-summary').innerHTML = d.summary;
+  const listEl = document.getElementById('detail-list');
+  if(d.html !== null && d.html !== undefined) listEl.innerHTML = d.html;
+  else if(d.list.length===0) listEl.innerHTML = '<div class="empty-note">Sin movimientos en este grupo.</div>';
+  else renderLedgerList(listEl, d.list);
+  document.getElementById('detail-actions').innerHTML = d.actions;
+}
+function openDetailModal(req){
+  detailRequest = req;
+  renderDetailModal();
+  document.getElementById('detail-overlay').style.display = 'flex';
+  document.querySelector('#detail-overlay .modal-panel').scrollTop = 0;
+  pushOverlayState();
+}
+function hideDetailModal(){
+  detailRequest = null;
+  document.getElementById('detail-overlay').style.display = 'none';
+}
+function refreshDetailModal(){
+  const ov = document.getElementById('detail-overlay');
+  if(detailRequest && ov && ov.style.display!=='none') renderDetailModal();
+}
+function reqFromTrigger(el){
+  return {type: el.dataset.detail, catId: el.dataset.detailCat, id: el.dataset.detailId, acctType: el.dataset.detailType};
+}
+function setupDetailModal(){
+  document.getElementById('detail-close').addEventListener('click', ()=> history.back());
+  document.getElementById('detail-overlay').addEventListener('click', (e)=>{
+    if(e.target.id==='detail-overlay'){ history.back(); return; }
+    const editBudget = e.target.closest('[data-detail-edit-budget]');
+    if(editBudget){
+      const catId = Number(editBudget.dataset.detailEditBudget);
+      hideDetailModal();
+      goToBudgetEdit(catId);
+      return;
+    }
+    const back = e.target.closest('[data-detail-back]');
+    if(back && detailRequest && detailRequest.prev){
+      e.stopPropagation();  // el contenido se vuelve a pintar: evita que el handler global lo trate como un toque externo
+      detailRequest = detailRequest.prev;
+      renderDetailModal();
+      return;
+    }
+    const nested = e.target.closest('[data-detail]');
+    if(nested && detailRequest){
+      e.stopPropagation();
+      detailRequest = {...reqFromTrigger(nested), prev: detailRequest};
+      renderDetailModal();
+      document.querySelector('#detail-overlay .modal-panel').scrollTop = 0;
+    }
+  });
+  document.addEventListener('click', (e)=>{
+    if(e.target.closest('#detail-overlay')) return;
+    const trigger = e.target.closest('[data-detail]');
+    if(!trigger) return;
+    openDetailModal(reqFromTrigger(trigger));
+  });
 }
 
 function goToBudgetEdit(categoryId){
@@ -1196,25 +1364,11 @@ function renderChart(containerId, catSpend, periodTx){
   el.innerHTML = `
     <div class="pie" style="background:conic-gradient(${gradParts.join(',')});"></div>
     <div class="legend">${legendItems.map(li=>`
-      <div class="legend-item" data-legend-toggle="${li.catId}" style="cursor:pointer;">
+      <div class="legend-item" data-detail="pcat" data-detail-cat="${li.catId}" style="cursor:pointer;">
         <span class="legend-swatch" style="background:${li.color}"></span><span class="legend-name">${escapeHtml(li.name)}</span><span class="legend-amt">${fmtMoney(li.amt)}</span>
       </div>
-      <div class="ledger" id="legend-detail-${li.catId}" style="display:none; margin:4px 0 8px;"></div>
     `).join('')}</div>
   `;
-  el.querySelectorAll('[data-legend-toggle]').forEach(row=>{
-    row.addEventListener('click', ()=>{
-      const catId = row.dataset.legendToggle;
-      const detailEl = document.getElementById('legend-detail-'+catId);
-      const isOpen = detailEl.style.display !== 'none';
-      el.querySelectorAll('[id^="legend-detail-"]').forEach(d=> d.style.display='none');
-      if(isOpen) return;
-      const items = periodTx.filter(t=>t.kind==='expense' && String(t.categoryId)===String(catId))
-        .sort((a,b)=> b.date.localeCompare(a.date));
-      detailEl.innerHTML = items.map(t=>ledgerRowEl({...t, itemType:'tx'}).outerHTML).join('');
-      detailEl.style.display = 'block';
-    });
-  });
 }
 
 function mergedLedger(){
@@ -1332,7 +1486,7 @@ function renderMovimientos(){
   populateAccountSelects();
   populateCategorySelect(document.getElementById('tx-category'), state.txType);
   populateSubcategorySelect();
-  populateDebtSelect(document.getElementById('tx-debt'), state.txType);
+  populateDebtUnified('tx', state.txType, true);
   populateTransferCategorySelects();
 
   document.getElementById('filter-account').innerHTML = '<option value="all">Todas las cuentas</option>' + sortedAccounts().map(a=>`<option value="${a.id}">${escapeHtml(a.name)}</option>`).join('');
@@ -1343,9 +1497,19 @@ function renderMovimientos(){
   filterAndRenderTx();
 }
 
+function preferredAccountId(){
+  if(state.lastAccountId && getAccount(state.lastAccountId)) return state.lastAccountId;
+  return getDefaultAccountId();
+}
+function rememberAccount(id){
+  if(!id) return;
+  state.lastAccountId = id;
+  ['tx-account','qk-account'].forEach(sid=>{ const el=document.getElementById(sid); if(el) el.value = String(id); });
+  idb.put('settings', {key:'lastAccountId', value:id}).catch(()=>{});
+}
 function populateAccountSelects(){
   const opts = sortedAccounts().map(a=>`<option value="${a.id}">${escapeHtml(a.name)} — ${fmtMoney(accountBalance(a.id), a.currency)}</option>`).join('');
-  const defaultId = getDefaultAccountId();
+  const defaultId = preferredAccountId();
   ['tx-account','tr-from','tr-to','qk-account','qk-tr-from','qk-tr-to'].forEach(id=>{
     const sel = document.getElementById(id);
     const prev = sel.value;
@@ -1373,8 +1537,10 @@ function populateSubcategorySelect(){
   const catId = Number(document.getElementById('tx-category').value);
   const cat = getCategory(catId);
   const sel = document.getElementById('tx-subcategory');
-  const subs = cat ? cat.subcategories : [];
+  const subs = (cat && cat.subcategories) ? cat.subcategories : [];
   sel.innerHTML = '<option value="">Ninguna</option>' + subs.map(s=>`<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('');
+  sel.value = '';
+  document.getElementById('tx-subcategory-field').style.display = subs.length ? 'block' : 'none';
 }
 
 function filterAndRenderTx(){
@@ -1466,7 +1632,7 @@ function renderCuentas(){
       const warn = !over && pct>80;
       div.innerHTML = `
         <div class="acct-main-row">
-          <div>
+          <div data-detail="acct" data-detail-id="${a.id}" style="cursor:pointer;">
             <div class="acct-name">${a.isDefault?'⭐ ':''}${escapeHtml(a.name)}</div>
             <div class="acct-meta">${typeLabels[a.type]||cap(a.type)} ${a.country?'· '+escapeHtml(a.country):''} <span class="currency-badge">${a.currency}</span></div>
           </div>
@@ -2589,6 +2755,7 @@ function renderAll(){
   renderPresupuestos();
   renderMas();
   renderAjustes();
+  refreshDetailModal();
 }
 
 /* ================= Events: nav ================= */
@@ -2604,6 +2771,7 @@ function switchToView(view, push){
 }
 
 function closeAllOverlays(){
+  detailRequest = null;
   document.querySelectorAll('.modal-overlay').forEach(m=> m.style.display='none');
   document.getElementById('mobile-drawer').classList.remove('open');
 }
@@ -2651,27 +2819,16 @@ function setupTxForm(){
       const isTransfer = state.txType === 'transfer';
       document.getElementById('tx-fields-normal').style.display = isTransfer ? 'none' : 'block';
       document.getElementById('tx-fields-transfer').style.display = isTransfer ? 'block' : 'none';
-      if(!isTransfer){ populateCategorySelect(document.getElementById('tx-category'), state.txType); populateSubcategorySelect(); populateDebtSelect(document.getElementById('tx-debt'), state.txType, state.txDebtMode); }
+      if(!isTransfer){ populateCategorySelect(document.getElementById('tx-category'), state.txType); populateSubcategorySelect(); populateDebtUnified('tx', state.txType, false); }
     });
   });
 
-  document.getElementById('tx-debt-mode-toggle').querySelectorAll('.type-btn').forEach(btn=>{
-    btn.addEventListener('click', ()=>{
-      document.querySelectorAll('#tx-debt-mode-toggle .type-btn').forEach(b=>b.classList.remove('active'));
-      btn.classList.add('active');
-      state.txDebtMode = btn.dataset.debtmode;
-      populateDebtSelect(document.getElementById('tx-debt'), state.txType, state.txDebtMode);
-      document.getElementById('tx-debt-newperson-field').style.display = 'none';
-      document.getElementById('tx-debt-newperson').value = '';
-    });
-  });
-  document.getElementById('tx-debt').addEventListener('change', (e)=>{
-    document.getElementById('tx-debt-newperson-field').style.display = e.target.value==='__new__' ? 'block' : 'none';
-  });
+  document.getElementById('tx-debt').addEventListener('change', ()=> updateDebtUI('tx'));
 
   document.getElementById('tx-category').addEventListener('change', populateSubcategorySelect);
-  document.getElementById('tx-date').value = todayISO();
-  document.getElementById('tr-date').value = todayISO();
+  setDateValue('tx', todayISO());
+  setDateValue('tr', todayISO());
+  ['tx','tr'].forEach(p=> document.getElementById(p+'-date').addEventListener('change', ()=> renderDateChips(p)));
 
   document.getElementById('tr-from').addEventListener('change', updateTransferSuggestion);
   document.getElementById('tr-to').addEventListener('change', updateTransferSuggestion);
@@ -2735,7 +2892,7 @@ function setupTxForm(){
         await idb.put('transactions', t);
         if(t.debtId && t.debtEffect) await applyDebtEffect(t.debtId, t.debtEffect, t.amount);
         await loadAll(); renderAll();
-        document.getElementById('tx-amount').value=''; document.getElementById('tx-note').value=''; document.getElementById('tx-debt-newperson').value=''; document.getElementById('tx-debt-newperson-field').style.display='none';
+        document.getElementById('tx-amount').value=''; document.getElementById('tx-note').value=''; document.getElementById('tx-debt').value=''; updateDebtUI('tx'); rememberAccount(t.accountId);
         toast((t.kind==='expense' && budgetAlertMessage(t.categoryId)) || 'Movimiento guardado');
       }
     }
@@ -2756,13 +2913,10 @@ function enterEditMode(tx){
   document.getElementById('tx-category').value = tx.categoryId;
   populateSubcategorySelect();
   document.getElementById('tx-subcategory').value = tx.subcategory || '';
-  state.txDebtMode = tx.debtEffect==='loan' ? 'loan' : 'payment';
-  document.querySelectorAll('#tx-debt-mode-toggle .type-btn').forEach(b=>b.classList.toggle('active', b.dataset.debtmode===state.txDebtMode));
-  populateDebtSelect(document.getElementById('tx-debt'), tx.kind, state.txDebtMode);
-  document.getElementById('tx-debt').value = tx.debtId || '';
-  document.getElementById('tx-debt-newperson-field').style.display = 'none';
-  document.getElementById('tx-debt-newperson').value = '';
-  document.getElementById('tx-date').value = tx.date;
+  populateDebtUnified('tx', tx.kind, false);
+  document.getElementById('tx-debt').value = tx.debtId ? String(tx.debtId) : '';
+  updateDebtUI('tx');
+  setDateValue('tx', tx.date);
   document.getElementById('tx-note').value = tx.note || '';
   document.getElementById('tx-form-title').textContent = 'Editar movimiento';
   document.getElementById('tx-submit-btn').textContent = 'Guardar cambios';
@@ -2781,7 +2935,7 @@ function enterTransferEditMode(tr){
   document.getElementById('tr-to').value = tr.toAccountId;
   document.getElementById('tr-amount-from').value = tr.fromAmount;
   document.getElementById('tr-amount-to').value = tr.toAmount;
-  document.getElementById('tr-date').value = tr.date;
+  setDateValue('tr', tr.date);
   populateTransferCategorySelects();
   document.getElementById('tr-category').value = tr.categoryId || '';
   document.getElementById('tr-note').value = tr.note || '';
@@ -2800,16 +2954,12 @@ function exitEditMode(){
   document.getElementById('tx-cancel-edit').style.display = 'none';
   document.getElementById('tx-amount').value = '';
   document.getElementById('tx-note').value = '';
-  document.getElementById('tx-date').value = todayISO();
+  setDateValue('tx', todayISO());
   document.getElementById('tr-amount-from').value = '';
   document.getElementById('tr-amount-to').value = '';
   document.getElementById('tr-note').value = '';
-  document.getElementById('tr-date').value = todayISO();
-  state.txDebtMode = 'payment';
-  document.querySelectorAll('#tx-debt-mode-toggle .type-btn').forEach(b=>b.classList.toggle('active', b.dataset.debtmode==='payment'));
-  populateDebtSelect(document.getElementById('tx-debt'), state.txType, state.txDebtMode);
-  document.getElementById('tx-debt-newperson-field').style.display = 'none';
-  document.getElementById('tx-debt-newperson').value = '';
+  setDateValue('tr', todayISO());
+  populateDebtUnified('tx', state.txType, false);
 }
 
 /* ================= Quick add (Resumen) ================= */
@@ -2817,6 +2967,7 @@ function renderQuickAdd(){
   const isTransfer = state.qkType === 'transfer';
   document.getElementById('qk-category-field').style.display = isTransfer ? 'none' : 'block';
   document.getElementById('qk-fields-normal').style.display = isTransfer ? 'none' : 'grid';
+  document.getElementById('qk-extra-normal').style.display = isTransfer ? 'none' : 'grid';
   document.getElementById('qk-fields-transfer').style.display = isTransfer ? 'grid' : 'none';
   if(isTransfer){
     populateAccountSelects();
@@ -2824,11 +2975,10 @@ function renderQuickAdd(){
   } else {
     populateCategorySelect(document.getElementById('qk-category'), state.qkType);
     populateQkSubcategory();
-    populateDebtSelect(document.getElementById('qk-debt'), state.qkType, state.qkDebtMode);
+    populateQkDebtSelect();
     renderQkCategoryGrid();
   }
-  document.getElementById('qk-date').value = document.getElementById('qk-date').value || todayISO();
-  renderQkDateChips();
+  setDateValue('qk', document.getElementById('qk-date').value || todayISO());
 }
 const QK_CATEGORY_LIMIT = 7;
 function renderQkCategoryGrid(){
@@ -2857,22 +3007,70 @@ function renderQkCategoryGrid(){
   }
   grid.innerHTML = html;
 }
-function renderQkDateChips(){
+function renderDateChips(p){
+  const input = document.getElementById(p+'-date');
+  if(!input) return;
   const today = todayISO();
   const y = new Date(today+"T00:00:00"); y.setDate(y.getDate()-1);
   const d2 = new Date(today+"T00:00:00"); d2.setDate(d2.getDate()-2);
   const chips = [[today,'Hoy'],[toISO(y),'Ayer'],[toISO(d2),'Hace 2 días']];
-  const current = document.getElementById('qk-date').value || today;
-  document.getElementById('qk-date-chips').innerHTML = chips.map(([d,label])=>
-    `<button type="button" class="date-chip ${current===d?'active':''}" data-qk-date-pick="${d}">${label}</button>`
+  const current = input.value || today;
+  document.getElementById(p+'-date-chips').innerHTML = chips.map(([d,label])=>
+    `<button type="button" class="date-chip ${current===d?'active':''}" data-date-pick="${d}" data-date-target="${p}">${label}</button>`
   ).join('');
+  // El calendario muestra la fecha elegida cuando no es ninguna de las tres rápidas
+  const custom = !chips.some(([d])=>d===current);
+  document.getElementById(p+'-date-cal').classList.toggle('active', custom);
+  document.getElementById(p+'-date-cal-label').textContent = custom ? '📅 '+fmtDate(current) : '📅';
 }
+function renderQkDateChips(){ renderDateChips('qk'); }
+function setDateValue(p, v){
+  document.getElementById(p+'-date').value = v;
+  renderDateChips(p);
+}
+/* Deuda relacionada: una sola lista con dos grupos; el tipo de movimiento se deduce de la opción elegida.
+   p = 'qk' (Añadir rápido) o 'tx' (formulario de Movimientos) */
+function populateDebtUnified(p, kind, keep){
+  const sel = document.getElementById(p+'-debt');
+  const prevVal = sel.value;
+  const optHtml = (d, mode)=> `<option value="${d.id}" data-mode="${mode}">${escapeHtml(d.person)} — ${fmtMoney(d.amount)}${d.note?' ('+escapeHtml(d.note)+')':''}</option>`;
+  const pay = debtsForKind(kind), loan = debtsForLoanKind(kind);
+  let html = '<option value="">Ninguna</option>';
+  if(pay.length) html += `<optgroup label="Pago / abono">${pay.map(d=>optHtml(d,'payment')).join('')}</optgroup>`;
+  html += `<optgroup label="Préstamo nuevo (suma)">${loan.map(d=>optHtml(d,'loan')).join('')}<option value="__new__" data-mode="loan">+ Nueva persona…</option></optgroup>`;
+  sel.innerHTML = html;
+  sel.value = '';
+  if(keep && prevVal && [...sel.options].some(o=>o.value===prevVal)) sel.value = prevVal;
+  updateDebtUI(p);
+}
+function updateDebtUI(p){
+  const sel = document.getElementById(p+'-debt');
+  const val = sel.value;
+  const field = document.getElementById(p+'-debt-mode-field');
+  const modeKey = p+'DebtMode';
+  if(!val){
+    state[modeKey] = 'payment';
+    field.style.display = 'none';
+    document.getElementById(p+'-debt-newperson-field').style.display = 'none';
+    document.getElementById(p+'-debt-newperson').value = '';
+    return;
+  }
+  const mode = sel.options[sel.selectedIndex].dataset.mode === 'loan' ? 'loan' : 'payment';
+  state[modeKey] = mode;
+  field.style.display = 'block';
+  document.querySelectorAll('#'+p+'-debt-mode-toggle .type-btn').forEach(b=> b.classList.toggle('active', b.dataset.debtmode===mode));
+  document.getElementById(p+'-debt-newperson-field').style.display = val==='__new__' ? 'block' : 'none';
+}
+function populateQkDebtSelect(){ populateDebtUnified('qk', state.qkType, false); }
+function updateQkDebtUI(){ updateDebtUI('qk'); }
 function populateQkSubcategory(){
   const catId = Number(document.getElementById('qk-category').value);
   const cat = getCategory(catId);
   const sel = document.getElementById('qk-subcategory');
-  const subs = cat ? cat.subcategories : [];
+  const subs = (cat && cat.subcategories) ? cat.subcategories : [];
   sel.innerHTML = '<option value="">Ninguna</option>' + subs.map(s=>`<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('');
+  sel.value = '';
+  document.getElementById('qk-subcategory-field').style.display = subs.length ? 'block' : 'none';
 }
 function setupQuickAdd(){
   document.getElementById('qk-type-toggle').querySelectorAll('.type-btn').forEach(btn=>{
@@ -2884,11 +3082,12 @@ function setupQuickAdd(){
       const isTransfer = state.qkType === 'transfer';
       document.getElementById('qk-category-field').style.display = isTransfer ? 'none' : 'block';
       document.getElementById('qk-fields-normal').style.display = isTransfer ? 'none' : 'grid';
+      document.getElementById('qk-extra-normal').style.display = isTransfer ? 'none' : 'grid';
       document.getElementById('qk-fields-transfer').style.display = isTransfer ? 'grid' : 'none';
       if(!isTransfer){
         populateCategorySelect(document.getElementById('qk-category'), state.qkType);
         populateQkSubcategory();
-        populateDebtSelect(document.getElementById('qk-debt'), state.qkType, state.qkDebtMode);
+        populateQkDebtSelect();
         renderQkCategoryGrid();
       } else {
         populateAccountSelects();
@@ -2896,22 +3095,10 @@ function setupQuickAdd(){
       }
     });
   });
-  document.getElementById('qk-debt-mode-toggle').querySelectorAll('.type-btn').forEach(btn=>{
-    btn.addEventListener('click', ()=>{
-      document.querySelectorAll('#qk-debt-mode-toggle .type-btn').forEach(b=>b.classList.remove('active'));
-      btn.classList.add('active');
-      state.qkDebtMode = btn.dataset.debtmode;
-      populateDebtSelect(document.getElementById('qk-debt'), state.qkType, state.qkDebtMode);
-      document.getElementById('qk-debt-newperson-field').style.display = 'none';
-      document.getElementById('qk-debt-newperson').value = '';
-    });
-  });
-  document.getElementById('qk-debt').addEventListener('change', (e)=>{
-    document.getElementById('qk-debt-newperson-field').style.display = e.target.value==='__new__' ? 'block' : 'none';
-  });
+  document.getElementById('qk-debt').addEventListener('change', updateQkDebtUI);
   document.getElementById('qk-category').addEventListener('change', populateQkSubcategory);
-  document.getElementById('qk-date').value = todayISO();
-  document.getElementById('qk-date').addEventListener('change', renderQkDateChips);
+  setDateValue('qk', todayISO());
+  document.getElementById('qk-date').addEventListener('change', ()=> renderDateChips('qk'));
 
   document.getElementById('qk-tr-from').addEventListener('change', updateQkTransferSuggestion);
   document.getElementById('qk-tr-to').addEventListener('change', updateQkTransferSuggestion);
@@ -2931,10 +3118,9 @@ function setupQuickAdd(){
       renderQkCategoryGrid();
       return;
     }
-    const datePick = e.target.closest('[data-qk-date-pick]');
+    const datePick = e.target.closest('[data-date-pick]');
     if(datePick){
-      document.getElementById('qk-date').value = datePick.dataset.qkDatePick;
-      renderQkDateChips();
+      setDateValue(datePick.dataset.dateTarget, datePick.dataset.datePick);
       return;
     }
   });
@@ -2987,22 +3173,19 @@ function setupQuickAdd(){
     if(t.debtId && t.debtEffect) await applyDebtEffect(t.debtId, t.debtEffect, t.amount);
     await loadAll(); renderAll();
     document.getElementById('qk-amount').value=''; document.getElementById('qk-note').value='';
-    document.getElementById('qk-date').value = todayISO();
-    document.getElementById('qk-debt-newperson').value=''; document.getElementById('qk-debt-newperson-field').style.display='none';
+    setDateValue('qk', todayISO());
+    document.getElementById('qk-debt').value=''; updateQkDebtUI();
+    rememberAccount(t.accountId);
     closeQuickAdd();
     toast((t.kind==='expense' && budgetAlertMessage(t.categoryId)) || 'Movimiento guardado');
   });
 }
 
 function openQuickAdd(){
-  state.qkDebtMode = 'payment';
   state.qkCategoryExpanded = false;
-  document.querySelectorAll('#qk-debt-mode-toggle .type-btn').forEach(b=>b.classList.toggle('active', b.dataset.debtmode==='payment'));
-  document.getElementById('qk-debt-newperson-field').style.display = 'none';
-  document.getElementById('qk-debt-newperson').value = '';
   renderQuickAdd();
   document.getElementById('quick-add-overlay').style.display = 'flex';
-  document.querySelector('#quick-add-overlay .modal-panel').scrollTop = 0;
+  document.getElementById('qk-form').scrollTop = 0;
   pushOverlayState();
 }
 function closeQuickAdd(){
@@ -3082,13 +3265,13 @@ function setupLedgerDelegation(){
     const editTx = e.target.closest('[data-edit-tx]');
     if(editTx){
       const tx = state.transactions.find(t=>t.id===Number(editTx.dataset.editTx));
-      if(tx) enterEditMode(tx);
+      if(tx){ hideDetailModal(); enterEditMode(tx); }
       return;
     }
     const editTr = e.target.closest('[data-edit-transfer]');
     if(editTr){
       const tr = state.transfers.find(t=>t.id===Number(editTr.dataset.editTransfer));
-      if(tr) enterTransferEditMode(tr);
+      if(tr){ hideDetailModal(); enterTransferEditMode(tr); }
       return;
     }
     const delTx = e.target.closest('[data-del-tx]');
@@ -3715,9 +3898,10 @@ async function init(){
     setupInstallments();
     setupSearch();
     setupLedgerSwipe();
+    setupDetailModal();
     document.addEventListener('change', (e)=>{
       if(e.target && e.target.id==='cashflow-range'){
-        state.cashflowRange = Number(e.target.value) || 30;
+        state.cashflowRange = e.target.value || '30';
         renderCashflow();
       }
     });

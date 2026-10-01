@@ -73,31 +73,47 @@
         <form id="tx-form">
           <div id="tx-fields-normal">
             <div class="form-grid">
+              <div class="field"><label>Importe</label><input type="number" id="tx-amount" step="0.01" min="0" placeholder="0,00" inputmode="decimal"></div>
               <div class="field"><label>Cuenta</label><select id="tx-account"></select></div>
-              <div class="field"><label>Importe</label><input type="number" id="tx-amount" step="0.01" min="0" placeholder="0,00"></div>
-              <div class="field"><label>Fecha</label><input type="date" id="tx-date"></div>
-              <div class="field"><label>Categoría</label><select id="tx-category"></select></div>
-              <div class="field"><label>Subcategoría</label><select id="tx-subcategory"></select></div>
-              <div class="field"><label>Deuda relacionada <span class="muted">opcional</span></label><select id="tx-debt"></select></div>
-              <div class="field"><label>Tipo de movimiento con la deuda</label>
-                <div class="type-toggle" id="tx-debt-mode-toggle" style="max-width:280px;">
-                  <button type="button" class="type-btn active" data-debtmode="payment">Pago/abono</button>
-                  <button type="button" class="type-btn" data-debtmode="loan">Préstamo nuevo (suma)</button>
+              <div class="field qk-wide"><label>Categoría</label><select id="tx-category"></select></div>
+              <div class="field qk-wide"><label>Fecha</label>
+                <div class="date-chip-row qk-date-row" style="margin:0;">
+                  <div id="tx-date-chips" style="display:contents;"></div>
+                  <label class="date-cal-btn" id="tx-date-cal" title="Elegir otra fecha">
+                    <span id="tx-date-cal-label">📅</span>
+                    <input type="date" id="tx-date">
+                  </label>
                 </div>
               </div>
-              <div class="field" id="tx-debt-newperson-field" style="display:none;"><label>Nombre de la persona</label><input type="text" id="tx-debt-newperson" placeholder="Nombre"></div>
-              <div class="field"><label>Nota</label><input type="text" id="tx-note" placeholder="Opcional"></div>
+              <div class="field qk-wide" id="tx-subcategory-field" style="display:none;"><label>Subcategoría</label><select id="tx-subcategory"></select></div>
+              <div class="field qk-wide"><label>Deuda relacionada <span class="muted">opcional</span></label><select id="tx-debt"></select></div>
+              <div class="field qk-wide" id="tx-debt-mode-field" style="display:none;"><label>Tipo de movimiento con la deuda</label>
+                <div class="type-toggle" id="tx-debt-mode-toggle" style="max-width:280px;">
+                  <button type="button" class="type-btn active" data-debtmode="payment" disabled>Pago/abono</button>
+                  <button type="button" class="type-btn" data-debtmode="loan" disabled>Préstamo nuevo (suma)</button>
+                </div>
+              </div>
+              <div class="field qk-wide" id="tx-debt-newperson-field" style="display:none;"><label>Nombre de la persona</label><input type="text" id="tx-debt-newperson" placeholder="Nombre"></div>
+              <div class="field qk-wide"><label>Nota</label><input type="text" id="tx-note" placeholder="Opcional"></div>
             </div>
           </div>
           <div id="tx-fields-transfer" style="display:none;">
             <div class="form-grid">
+              <div class="field"><label>Importe enviado</label><input type="number" id="tr-amount-from" step="0.01" min="0" placeholder="0,00" inputmode="decimal"></div>
+              <div class="field"><label>Importe recibido</label><input type="number" id="tr-amount-to" step="0.01" min="0" placeholder="0,00" inputmode="decimal"></div>
               <div class="field"><label>Cuenta origen</label><select id="tr-from"></select></div>
               <div class="field"><label>Cuenta destino</label><select id="tr-to"></select></div>
-              <div class="field"><label>Importe enviado</label><input type="number" id="tr-amount-from" step="0.01" min="0" placeholder="0,00"></div>
-              <div class="field"><label>Importe recibido</label><input type="number" id="tr-amount-to" step="0.01" min="0" placeholder="0,00"></div>
-              <div class="field"><label>Fecha</label><input type="date" id="tr-date"></div>
-              <div class="field"><label>Categoría <span class="muted">opcional</span></label><select id="tr-category"><option value="">Sin categoría</option></select></div>
-              <div class="field"><label>Nota</label><input type="text" id="tr-note" placeholder="Opcional"></div>
+              <div class="field qk-wide"><label>Fecha</label>
+                <div class="date-chip-row qk-date-row" style="margin:0;">
+                  <div id="tr-date-chips" style="display:contents;"></div>
+                  <label class="date-cal-btn" id="tr-date-cal" title="Elegir otra fecha">
+                    <span id="tr-date-cal-label">📅</span>
+                    <input type="date" id="tr-date">
+                  </label>
+                </div>
+              </div>
+              <div class="field qk-wide"><label>Categoría <span class="muted">opcional</span></label><select id="tr-category"><option value="">Sin categoría</option></select></div>
+              <div class="field qk-wide"><label>Nota</label><input type="text" id="tr-note" placeholder="Opcional"></div>
             </div>
           </div>
           <button type="submit" class="btn-primary" id="tx-submit-btn">Guardar movimiento</button>
@@ -349,51 +365,69 @@
 
 <button id="fab-add" class="fab-btn" title="Añadir movimiento" aria-label="Añadir movimiento">+</button>
 
+<div class="modal-overlay" id="detail-overlay" style="display:none;">
+  <div class="modal-panel">
+    <div class="modal-header">
+      <div class="section-title" style="margin-bottom:0;" id="detail-title"></div>
+      <button class="icon-btn" id="detail-close" title="Cerrar">✕</button>
+    </div>
+    <div class="stat-sub" id="detail-summary" style="margin:8px 0 12px;"></div>
+    <div class="ledger" id="detail-list"></div>
+    <div id="detail-actions" style="margin-top:14px;"></div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="quick-add-overlay" style="display:none;">
   <div class="modal-panel">
     <div class="modal-header">
       <div class="section-title" style="margin-bottom:0;">Añadir rápido</div>
       <button class="icon-btn" id="quick-add-close" title="Cerrar">✕</button>
     </div>
-    <div class="type-toggle" style="margin:14px 0;" id="qk-type-toggle">
+    <div class="type-toggle" style="margin:10px 0;" id="qk-type-toggle">
       <button type="button" class="type-btn active" data-type="expense">Gasto</button>
       <button type="button" class="type-btn" data-type="income">Ingreso</button>
       <button type="button" class="type-btn" data-type="transfer">Transferencia</button>
     </div>
-    <form id="qk-form">
-      <div class="field" style="margin-bottom:14px;" id="qk-category-field">
+    <form id="qk-form" class="qk-scroll">
+      <div class="form-grid qk-block" id="qk-fields-normal">
+        <div class="field"><label>Importe</label><input type="number" id="qk-amount" step="0.01" min="0" placeholder="0,00" inputmode="decimal"></div>
+        <div class="field"><label>Cuenta</label><select id="qk-account"></select></div>
+      </div>
+      <div class="form-grid qk-block" id="qk-fields-transfer" style="display:none;">
+        <div class="field"><label>Importe enviado</label><input type="number" id="qk-tr-amount-from" step="0.01" min="0" placeholder="0,00" inputmode="decimal"></div>
+        <div class="field"><label>Importe recibido</label><input type="number" id="qk-tr-amount-to" step="0.01" min="0" placeholder="0,00" inputmode="decimal"></div>
+        <div class="field"><label>Cuenta origen</label><select id="qk-tr-from"></select></div>
+        <div class="field"><label>Cuenta destino</label><select id="qk-tr-to"></select></div>
+        <div class="field qk-wide"><label>Categoría <span class="muted">opcional</span></label><select id="qk-tr-category"><option value="">Sin categoría</option></select></div>
+      </div>
+      <div class="field" style="margin-bottom:12px;" id="qk-category-field">
         <label>Categoría</label>
         <div id="qk-category-grid" class="cat-grid"></div>
         <select id="qk-category" style="display:none;"></select>
       </div>
-      <div class="field" style="margin-bottom:14px;">
-        <label>Fecha</label>
-        <div class="date-chip-row" id="qk-date-chips"></div>
-        <input type="date" id="qk-date" style="margin-top:8px;">
+      <div class="date-chip-row qk-date-row">
+        <div id="qk-date-chips" style="display:contents;"></div>
+        <label class="date-cal-btn" id="qk-date-cal" title="Elegir otra fecha">
+          <span id="qk-date-cal-label">📅</span>
+          <input type="date" id="qk-date">
+        </label>
       </div>
-      <div class="form-grid" id="qk-fields-normal">
-        <div class="field"><label>Cuenta</label><select id="qk-account"></select></div>
-        <div class="field"><label>Importe</label><input type="number" id="qk-amount" step="0.01" min="0" placeholder="0,00"></div>
-        <div class="field"><label>Subcategoría</label><select id="qk-subcategory"></select></div>
-        <div class="field"><label>Deuda relacionada <span class="muted">opcional</span></label><select id="qk-debt"></select></div>
-        <div class="field"><label>Tipo de movimiento con la deuda</label>
+      <div class="form-grid" id="qk-extra-normal">
+        <div class="field qk-wide" id="qk-subcategory-field" style="display:none;"><label>Subcategoría</label><select id="qk-subcategory"></select></div>
+        <div class="field qk-wide"><label>Deuda relacionada <span class="muted">opcional</span></label><select id="qk-debt"></select></div>
+        <div class="field qk-wide" id="qk-debt-mode-field" style="display:none;"><label>Tipo de movimiento con la deuda</label>
           <div class="type-toggle" id="qk-debt-mode-toggle" style="max-width:280px;">
-            <button type="button" class="type-btn active" data-debtmode="payment">Pago/abono</button>
-            <button type="button" class="type-btn" data-debtmode="loan">Préstamo nuevo (suma)</button>
+            <button type="button" class="type-btn active" data-debtmode="payment" disabled>Pago/abono</button>
+            <button type="button" class="type-btn" data-debtmode="loan" disabled>Préstamo nuevo (suma)</button>
           </div>
         </div>
-        <div class="field" id="qk-debt-newperson-field" style="display:none;"><label>Nombre de la persona</label><input type="text" id="qk-debt-newperson" placeholder="Nombre"></div>
+        <div class="field qk-wide" id="qk-debt-newperson-field" style="display:none;"><label>Nombre de la persona</label><input type="text" id="qk-debt-newperson" placeholder="Nombre"></div>
       </div>
-      <div class="form-grid" id="qk-fields-transfer" style="display:none;">
-        <div class="field"><label>Cuenta origen</label><select id="qk-tr-from"></select></div>
-        <div class="field"><label>Cuenta destino</label><select id="qk-tr-to"></select></div>
-        <div class="field"><label>Importe enviado</label><input type="number" id="qk-tr-amount-from" step="0.01" min="0" placeholder="0,00"></div>
-        <div class="field"><label>Importe recibido</label><input type="number" id="qk-tr-amount-to" step="0.01" min="0" placeholder="0,00"></div>
-        <div class="field"><label>Categoría <span class="muted">opcional</span></label><select id="qk-tr-category"><option value="">Sin categoría</option></select></div>
-      </div>
-      <div class="field"><label>Nota</label><input type="text" id="qk-note" placeholder="Opcional"></div>
-      <button type="submit" class="btn-primary">Guardar</button>
+      <div class="field" style="margin-top:12px;"><label>Nota</label><input type="text" id="qk-note" placeholder="Opcional"></div>
     </form>
+    <div class="qk-footer">
+      <button type="submit" form="qk-form" class="btn-primary">Guardar</button>
+    </div>
   </div>
 </div>
 
