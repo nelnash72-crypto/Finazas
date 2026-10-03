@@ -750,6 +750,7 @@ function renderResumen(){
     const netEl = document.getElementById('stat-net');
     netEl.textContent = fmtMoney(income-expense);
     netEl.style.color = (income-expense) < 0 ? 'var(--over)' : 'var(--text)';
+    renderIncomeSplit(periodTx, income, expense);
 
     const compareEl = document.getElementById('stat-compare');
     if(state.resumenPeriod.mode === 'month'){
@@ -837,6 +838,8 @@ const RESUMEN_BLOCK_HTML = {
           <div class="stat-sub" id="stat-compare"></div>
         </div>
       </div>
+      <div class="section-title" style="font-size:15px;">¿A dónde va tu ingreso?</div>
+      <div id="resumen-split" style="margin-bottom:22px;"></div>
       <div class="section-title" style="font-size:15px;">Gastos por categoría</div>
       <div class="chart-wrap" id="resumen-chart"></div>
     </div>`,
@@ -959,6 +962,40 @@ function cycleActionsHtml(r){
   return `<button type="button" class="btn-secondary btn-sm" data-cycle-pay="${r.id}">Registrar hoy</button>
     <label class="date-cal-btn" title="Posponer / cambiar fecha" style="margin-left:0; display:inline-flex; vertical-align:middle;"><span>📅 Posponer</span><input type="date" data-cycle-postpone="${r.id}" value="${cycleNextDue(r)}"></label>`;
 }
+/* Reparto del ingreso: prioritarios (fijos: recurrentes y cuotas) / variables / lo que sobra */
+function isFixedTx(t){ return t.source==='recurring' || t.source==='installment'; }
+function renderIncomeSplit(periodTx, income, expense){
+  const el = document.getElementById('resumen-split');
+  if(!el) return;
+  let fixed = 0, variable = 0;
+  periodTx.forEach(t=>{
+    if(t.kind!=='expense') return;
+    const acc = getAccount(t.accountId);
+    const amt = toBase(t.amount, acc?acc.currency:state.baseCurrency);
+    if(isFixedTx(t)) fixed += amt; else variable += amt;
+  });
+  if(income<=0.004 && expense<=0.004){ el.innerHTML = '<div class="empty-note">Sin movimientos en este período.</div>'; return; }
+  const left = income - expense;
+  const over = left < 0;
+  const base = Math.max(income, expense);
+  const pct = v => base>0 ? Math.max(0, v/base*100) : 0;
+  const pOfInc = v => income>0.004 ? ' · '+Math.round(v/income*100)+'% del ingreso' : '';
+  const C = {fixed:'#4C7EA8', variable:'#B9702C', left:'var(--teal)'};
+  const seg = (v, color, detail)=> v>0.004 ? `<div ${detail?`data-detail="${detail}"`:''} style="width:${pct(v)}%; background:${color}; ${detail?'cursor:pointer;':''}"></div>` : '';
+  const row = (color, label, v, detail, extra)=> `<div class="legend-item" ${detail?`data-detail="${detail}" style="cursor:pointer;"`:''}><span class="legend-swatch" style="background:${color}"></span><span class="legend-name">${label}<span class="muted" style="font-weight:400;">${extra||''}</span></span><span class="legend-amt">${fmtMoney(v)}</span></div>`;
+  el.innerHTML = `
+    <div style="display:flex; height:22px; border-radius:7px; overflow:hidden; background:var(--rule); margin-bottom:12px;">
+      ${seg(fixed, C.fixed, 'pfixed')}${seg(variable, C.variable, 'pvar')}${over ? '' : seg(left, C.left, null)}
+    </div>
+    <div class="legend">
+      ${row(C.fixed, '🔁 Prioritarios (fijos)', fixed, 'pfixed', pOfInc(fixed))}
+      ${row(C.variable, '✏️ Variables', variable, 'pvar', pOfInc(variable))}
+      ${over
+        ? `<div class="legend-item"><span class="legend-swatch" style="background:var(--over)"></span><span class="legend-name" style="color:var(--over);">Te pasaste del ingreso</span><span class="legend-amt" style="color:var(--over);">${fmtMoney(-left)}</span></div>`
+        : row(C.left, '💰 Te sobra', left, null, pOfInc(left))}
+    </div>`;
+}
+
 function renderPaymentAlerts(){
   const card = document.getElementById('card-payment-alerts');
   const list = document.getElementById('payment-alerts-list');
@@ -1282,12 +1319,14 @@ function buildDetail(req){
     }
     d.list = sortLedgerDesc(list); d.summary = sumLine(list, extra);
   }
-  else if(['pcat','pexp','pinc'].includes(req.type)){
+  else if(['pcat','pexp','pinc','pfixed','pvar'].includes(req.type)){
     const range = periodRange(state.resumenPeriod);
     const periodTx = txInRange(state.transactions, range.start, range.end);
     let list;
     if(req.type==='pinc'){ list = periodTx.filter(t=>t.kind==='income'); d.title = 'Ingresos del período'; }
     else if(req.type==='pexp'){ list = periodTx.filter(t=>t.kind==='expense'); d.title = 'Gastos del período'; }
+    else if(req.type==='pfixed'){ list = periodTx.filter(t=>t.kind==='expense' && isFixedTx(t)); d.title = '🔁 Prioritarios (fijos) del período'; }
+    else if(req.type==='pvar'){ list = periodTx.filter(t=>t.kind==='expense' && !isFixedTx(t)); d.title = '✏️ Gastos variables del período'; }
     else {
       const cat = getCategory(Number(req.catId));
       list = periodTx.filter(t=>t.kind==='expense' && String(t.categoryId)===String(req.catId));
