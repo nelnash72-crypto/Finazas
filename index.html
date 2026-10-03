@@ -474,8 +474,9 @@
           <div class="field"><label>Importe</label><input type="number" id="rec-amount" step="0.01" min="0" placeholder="0,00"></div>
           <div class="field"><label>Categoría</label><select id="rec-category"></select></div>
           <div class="field"><label>Frecuencia</label>
-            <select id="rec-frequency"><option value="monthly">Mensual</option><option value="weekly">Semanal</option><option value="yearly">Anual</option></select>
+            <select id="rec-frequency"><option value="monthly">Mensual</option><option value="weekly">Semanal</option><option value="yearly">Anual</option><option value="cycle">Cada N días (renovación manual)</option></select>
           </div>
+          <div class="field" id="rec-cycle-field" style="display:none;"><label>Cada cuántos días <span class="muted">ej. 28 móvil, 30 transporte</span></label><input type="number" id="rec-cycle-days" min="1" step="1" placeholder="30" inputmode="numeric"></div>
           <div class="field"><label>Primera fecha</label><input type="date" id="rec-date"></div>
           <div class="field"><label>Deuda relacionada <span class="muted">opcional</span></label><select id="rec-debt"></select></div>
           <div class="field"><label>Tipo de movimiento con la deuda</label>

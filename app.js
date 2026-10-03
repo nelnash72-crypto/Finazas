@@ -400,7 +400,7 @@ function nextRecurringDate(dateStr, freq){
 async function generateDueRecurring(){
   const today = todayISO();
   for(const r of state.recurring){
-    if(r.active===false) continue;
+    if(r.active===false || r.frequency==='cycle') continue;  // los de ciclo se registran a mano
     let next = r.lastGenerated ? nextRecurringDate(r.lastGenerated, r.frequency) : r.startDate;
     let iterations = 0;
     let changed = false;
@@ -788,7 +788,7 @@ function renderResumen(){
 const RESUMEN_BLOCKS_META = [
   {id:'saldo', label:'Saldo total'},
   {id:'presupuestos', label:'Presupuestos de este mes'},
-  {id:'avisos', label:'Avisos de pago de tarjeta'},
+  {id:'avisos', label:'Avisos (tarjeta y renovaciones)'},
   {id:'patrimonio', label:'Patrimonio neto'},
   {id:'ingresos-gastos', label:'Ingresos y gastos'},
   {id:'flujo-caja', label:'Proyección de flujo de caja'},
@@ -809,7 +809,7 @@ const RESUMEN_BLOCK_HTML = {
       <div id="resumen-budgets"></div>
     </div>`,
   avisos: `<div class="card" id="card-payment-alerts" style="display:none;">
-      <div class="section-title">Avisos de pago de tarjeta</div>
+      <div class="section-title">Avisos</div>
       <div id="payment-alerts-list"></div>
     </div>`,
   patrimonio: `<div class="card">
@@ -929,6 +929,36 @@ function setupResumenLayoutSettings(){
 }
 
 
+/* ===== Gastos por ciclo (cada N días, renovación manual) ===== */
+function cycleDueList(){
+  return state.recurring.filter(r=> r.frequency==='cycle' && r.active!==false && !r.isTransfer);
+}
+async function registerCycle(id){
+  const r = state.recurring.find(x=>x.id===id);
+  if(!r) return;
+  const today = todayISO();
+  const days = Math.max(1, Number(r.cycleDays)||30);
+  const txRecord = {accountId:r.accountId, kind:r.kind, amount:r.amount, categoryId:r.categoryId, subcategory:r.subcategory||'', date:today, note:(r.note ? r.note+' · ' : '')+'Ciclo', debtId:r.debtId||null, debtEffect:r.debtId?(r.debtEffect||'payment'):null, source:'recurring'};
+  txRecord.id = await idb.put('transactions', txRecord);
+  if(r.debtId) await applyDebtEffect(r.debtId, r.debtEffect||'payment', r.amount);
+  r.lastGenerated = today;
+  r.nextDue = addDaysISO(today, days);   // el siguiente ciclo cuenta desde el pago real
+  await idb.put('recurring', r);
+  await loadAll(); renderAll();
+  toast('Registrado · próximo ' + fmtDate(r.nextDue));
+}
+async function postponeCycle(id, dateISO){
+  const r = state.recurring.find(x=>x.id===id);
+  if(!r || !dateISO) return;
+  r.nextDue = dateISO;
+  await idb.put('recurring', r);
+  await loadAll(); renderAll();
+  toast('Pospuesto al ' + fmtDate(dateISO));
+}
+function cycleActionsHtml(r){
+  return `<button type="button" class="btn-secondary btn-sm" data-cycle-pay="${r.id}">Registrar hoy</button>
+    <label class="date-cal-btn" title="Posponer / cambiar fecha" style="margin-left:0; display:inline-flex; vertical-align:middle;"><span>📅 Posponer</span><input type="date" data-cycle-postpone="${r.id}" value="${cycleNextDue(r)}"></label>`;
+}
 function renderPaymentAlerts(){
   const card = document.getElementById('card-payment-alerts');
   const list = document.getElementById('payment-alerts-list');
@@ -946,10 +976,22 @@ function renderPaymentAlerts(){
       alerts.push({account:a, used, dueDate, daysUntil, autopayAcc: a.autopayAccountId ? getAccount(a.autopayAccountId) : null});
     }
   });
-  if(alerts.length===0){ card.style.display='none'; return; }
+  const cycleAlerts = [];
+  cycleDueList().forEach(r=>{
+    const due = cycleNextDue(r);
+    const daysUntil = Math.round((new Date(due+"T00:00:00") - new Date(today+"T00:00:00")) / 86400000);
+    if(daysUntil <= 3) cycleAlerts.push({r, due, daysUntil});
+  });
+  if(alerts.length===0 && cycleAlerts.length===0){ card.style.display='none'; return; }
   card.style.display='block';
   alerts.sort((x,y)=> x.daysUntil - y.daysUntil);
-  list.innerHTML = alerts.map(al=>{
+  cycleAlerts.sort((x,y)=> x.daysUntil - y.daysUntil);
+  const cycleHtml = cycleAlerts.map(ca=>{
+    const r = ca.r, acc = getAccount(r.accountId), cat = getCategory(r.categoryId);
+    const when = ca.daysUntil<0 ? `vencido hace ${-ca.daysUntil} ${(-ca.daysUntil)===1?'día':'días'}` : (ca.daysUntil===0 ? 'vence hoy' : (ca.daysUntil===1 ? 'vence mañana' : `vence en ${ca.daysUntil} días`));
+    return `<div class="budget-row"><div class="budget-top"><div class="budget-cat">🔄 ${escapeHtml(r.note || (cat?cat.name:'Renovación'))}</div><div class="budget-nums">${fmtMoney(r.amount, acc?acc.currency:state.baseCurrency)}</div></div><div class="stat-sub" style="${ca.daysUntil<0?'color:var(--over);':''}">Cada ${r.cycleDays} días · ${when} (${fmtDate(ca.due)})</div><div style="margin-top:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">${cycleActionsHtml(r)}</div></div>`;
+  }).join('');
+  list.innerHTML = cycleHtml + alerts.map(al=>{
     const when = al.daysUntil===0 ? 'hoy' : (al.daysUntil===1 ? 'mañana' : `en ${al.daysUntil} días`);
     const debitMsg = al.autopayAcc ? `Se debitará automáticamente desde ${escapeHtml(al.autopayAcc.name)}.` : 'No tienes débito automático configurado · recuerda pagarla a tiempo.';
     return `<div class="budget-row"><div class="budget-top"><div class="budget-cat">💳 ${escapeHtml(al.account.name)}</div><div class="budget-nums">${fmtMoney(al.used, al.account.currency)}</div></div><div class="stat-sub">Se paga ${when} (${fmtDate(al.dueDate)}) · ${debitMsg}</div></div>`;
@@ -957,9 +999,22 @@ function renderPaymentAlerts(){
 }
 
 /* ================= Proyección de flujo de caja ================= */
+function cycleNextDue(r){ return r.nextDue || r.startDate; }
+function addDaysISO(iso, n){ const d = new Date(iso+"T00:00:00"); d.setDate(d.getDate()+n); return localISO(d); }
 function projectRecurringOccurrences(r, fromDate, toDate){
   const out = [];
   if(r.active===false) return out;
+  if(r.frequency==='cycle'){
+    const days = Math.max(1, Number(r.cycleDays)||30);
+    let next = cycleNextDue(r);
+    if(next < fromDate) next = fromDate;   // vencido: se espera hoy
+    let it = 0;
+    while(next && next <= toDate && it < 60){
+      out.push({date:next, label:(r.note || getCategory(r.categoryId)?.name || 'Recurrente'), amount:r.amount, currency: getAccount(r.accountId)?.currency||state.baseCurrency, kind:r.kind});
+      next = addDaysISO(next, days); it++;
+    }
+    return out;
+  }
   let next = r.lastGenerated ? nextRecurringDate(r.lastGenerated, r.frequency) : r.startDate;
   let iterations = 0;
   while(next && next <= toDate && iterations < 60){
@@ -1876,7 +1931,7 @@ function renderMas(){
     recEl.innerHTML = '<div class="empty-note">Sin movimientos recurrentes todavía.</div>';
   } else {
     state.recurring.forEach(r=>{
-      const freqLabel = {weekly:'Semanal', monthly:'Mensual', yearly:'Anual'}[r.frequency] || r.frequency;
+      const freqLabel = r.frequency==='cycle' ? `Cada ${r.cycleDays} días` : ({weekly:'Semanal', monthly:'Mensual', yearly:'Anual'}[r.frequency] || r.frequency);
       const div = document.createElement('div');
       div.className = 'account-card' + (r.active===false ? ' hidden-acct' : '');
 
@@ -1920,6 +1975,7 @@ function renderMas(){
         <div>
           <div class="acct-name">${escapeHtml(r.note || (cat?cat.name:'Recurrente'))}${r.debtId && r.debtEffect==='loan' ? ' <span class="muted" style="font-weight:normal;">(préstamo nuevo)</span>' : ''}</div>
           <div class="acct-meta">${freqLabel} · ${cat?catIcon(cat)+' '+escapeHtml(cat.name):''} · ${acc?escapeHtml(acc.name):''}</div>
+          ${r.frequency==='cycle' && r.active!==false ? `<div class="acct-meta" style="margin-top:6px;">Próximo: <strong>${fmtDate(cycleNextDue(r))}</strong></div><div style="margin-top:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">${cycleActionsHtml(r)}</div>` : ''}
         </div>
         <div class="acct-right">
           <div class="acct-balance ${r.kind}">${r.kind==='income'?'+':'-'}${fmtMoney(r.amount, acc?acc.currency:state.baseCurrency).replace('-','')}</div>
@@ -1933,7 +1989,9 @@ function renderMas(){
             <div class="field"><label>Cuenta</label><select data-rec-edit-account="${r.id}">${sortedAccounts().map(a=>`<option value="${a.id}" ${a.id===r.accountId?'selected':''}>${escapeHtml(a.name)} (${a.currency})</option>`).join('')}</select></div>
             <div class="field"><label>Importe</label><input type="number" step="0.01" min="0" data-rec-edit-amount="${r.id}" value="${r.amount}"></div>
             <div class="field"><label>Categoría</label><select data-rec-edit-category="${r.id}">${sortedCategories(r.kind).map(c=>`<option value="${c.id}" ${c.id===r.categoryId?'selected':''}>${catIcon(c)} ${escapeHtml(c.name)}</option>`).join('')}</select></div>
-            <div class="field"><label>Frecuencia</label><select data-rec-edit-frequency="${r.id}">${['weekly','monthly','yearly'].map(f=>`<option value="${f}" ${f===r.frequency?'selected':''}>${({weekly:'Semanal',monthly:'Mensual',yearly:'Anual'})[f]}</option>`).join('')}</select></div>
+            ${r.frequency==='cycle'
+              ? `<div class="field"><label>Cada cuántos días</label><input type="number" min="1" step="1" data-rec-edit-cycledays="${r.id}" value="${r.cycleDays}"></div>`
+              : `<div class="field"><label>Frecuencia</label><select data-rec-edit-frequency="${r.id}">${['weekly','monthly','yearly'].map(f=>`<option value="${f}" ${f===r.frequency?'selected':''}>${({weekly:'Semanal',monthly:'Mensual',yearly:'Anual'})[f]}</option>`).join('')}</select></div>`}
             <div class="field"><label>Tipo con la deuda</label><select data-rec-edit-debtmode="${r.id}"><option value="payment" ${r.debtEffect!=='loan'?'selected':''}>Pago/abono</option><option value="loan" ${r.debtEffect==='loan'?'selected':''}>Préstamo nuevo (suma)</option></select></div>
             <div class="field"><label>Deuda relacionada</label><select data-rec-edit-debt="${r.id}"><option value="">Ninguna</option>${(r.debtEffect==='loan' ? debtsForLoanKind(r.kind) : debtsForKind(r.kind)).map(d=>`<option value="${d.id}" ${d.id===r.debtId?'selected':''}>${escapeHtml(d.person)} — ${fmtMoney(d.amount)}</option>`).join('')}</select></div>
             <div class="field"><label>Persona</label><input type="text" data-rec-edit-person="${r.id}" value="${escapeHtml(r.person||'')}"></div>
@@ -2330,8 +2388,24 @@ function setupGoals(){
   });
 }
 
+function setupCycleActions(){
+  document.addEventListener('click', (e)=>{
+    const pay = e.target.closest('[data-cycle-pay]');
+    if(pay){ e.preventDefault(); registerCycle(Number(pay.dataset.cyclePay)); }
+  });
+  document.addEventListener('change', (e)=>{
+    const pp = e.target.closest && e.target.closest('[data-cycle-postpone]');
+    if(pp && pp.value){ postponeCycle(Number(pp.dataset.cyclePostpone), pp.value); }
+  });
+}
 function setupRecurring(){
   let recType = 'expense';
+  const syncCycleField = ()=>{
+    const isCycle = document.getElementById('rec-frequency').value==='cycle';
+    document.getElementById('rec-cycle-field').style.display = isCycle ? 'block' : 'none';
+  };
+  document.getElementById('rec-frequency').addEventListener('change', syncCycleField);
+  syncCycleField();
   document.getElementById('rec-type-toggle').querySelectorAll('.type-btn').forEach(btn=>{
     btn.addEventListener('click', ()=>{
       document.querySelectorAll('#rec-type-toggle .type-btn').forEach(b=>b.classList.remove('active'));
@@ -2412,13 +2486,17 @@ function setupRecurring(){
       if(debtIdVal==='__new__'){
         resolvedDebtId = await findOrCreateDebtFor(document.getElementById('rec-debt-newperson').value, loanDirectionForKind(recType));
       }
+      const freqVal = document.getElementById('rec-frequency').value;
+      const cycleDays = Math.round(Number(document.getElementById('rec-cycle-days').value));
+      if(freqVal==='cycle' && (!cycleDays || cycleDays<1)){ toast('Indica cada cuántos días se renueva'); return; }
       await idb.put('recurring', {
         accountId: Number(document.getElementById('rec-account').value),
         kind: recType,
         amount,
         categoryId: Number(document.getElementById('rec-category').value),
         subcategory: '',
-        frequency: document.getElementById('rec-frequency').value,
+        frequency: freqVal,
+        ...(freqVal==='cycle' ? {cycleDays, nextDue: startDate} : {}),
         startDate,
         lastGenerated: null,
         note: document.getElementById('rec-note').value.trim(),
@@ -2472,13 +2550,17 @@ function setupRecurring(){
       const accountId = Number(document.querySelector(`[data-rec-edit-account="${id}"]`).value);
       const amount = parseFloat(document.querySelector(`[data-rec-edit-amount="${id}"]`).value);
       const categoryId = Number(document.querySelector(`[data-rec-edit-category="${id}"]`).value);
-      const frequency = document.querySelector(`[data-rec-edit-frequency="${id}"]`).value;
+      const freqEl = document.querySelector(`[data-rec-edit-frequency="${id}"]`);
+      const cycleEl = document.querySelector(`[data-rec-edit-cycledays="${id}"]`);
+      const frequency = freqEl ? freqEl.value : 'cycle';
+      const cycleDays = cycleEl ? Math.round(Number(cycleEl.value)) : null;
+      if(cycleEl && (!cycleDays || cycleDays<1)){ toast('Indica los días del ciclo'); return; }
       const note = document.querySelector(`[data-rec-edit-note="${id}"]`).value.trim();
       const person = document.querySelector(`[data-rec-edit-person="${id}"]`).value.trim();
       const debtIdVal = document.querySelector(`[data-rec-edit-debt="${id}"]`).value;
       const debtEffect = document.querySelector(`[data-rec-edit-debtmode="${id}"]`).value;
       if(!amount || amount<=0){ toast('Introduce un importe válido'); return; }
-      await idb.put('recurring', {...r, accountId, amount, categoryId, frequency, note, person, debtId: debtIdVal ? Number(debtIdVal) : null, debtEffect: debtIdVal ? debtEffect : null});
+      await idb.put('recurring', {...r, accountId, amount, categoryId, frequency, ...(cycleEl ? {cycleDays} : {}), note, person, debtId: debtIdVal ? Number(debtIdVal) : null, debtEffect: debtIdVal ? debtEffect : null});
       await loadAll(); renderAll();
       toast('Recurrente actualizado');
       return;
@@ -3899,6 +3981,7 @@ async function init(){
     setupSearch();
     setupLedgerSwipe();
     setupDetailModal();
+    setupCycleActions();
     document.addEventListener('change', (e)=>{
       if(e.target && e.target.id==='cashflow-range'){
         state.cashflowRange = e.target.value || '30';
