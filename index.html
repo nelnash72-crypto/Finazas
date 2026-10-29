@@ -75,6 +75,22 @@
             <div class="form-grid">
               <div class="field"><label>Importe</label><input type="number" id="tx-amount" step="0.01" min="0" placeholder="0,00" inputmode="decimal"></div>
               <div class="field"><label>Cuenta</label><select id="tx-account"></select></div>
+              <div class="field qk-wide" id="tx-split-field" style="display:none;">
+        <div class="split-row"><div><div class="settings-label" style="font-size:13.5px;">Fraccionar este pago</div><div class="settings-desc" style="margin-top:2px;">En cuotas, con tu tarjeta</div></div><label class="switch"><input type="checkbox" id="tx-split-toggle"><span class="switch-slider"></span></label></div>
+        <div id="tx-split-body" style="display:none; margin-top:10px;">
+          <div class="date-chip-row" style="margin:0 0 10px;">
+            <button type="button" class="date-chip" data-split-n="3" data-split-target="tx">3</button>
+            <button type="button" class="date-chip" data-split-n="6" data-split-target="tx">6</button>
+            <button type="button" class="date-chip" data-split-n="12" data-split-target="tx">12</button>
+            <button type="button" class="date-chip" data-split-n="24" data-split-target="tx">24</button>
+          </div>
+          <div class="form-grid">
+            <div class="field"><label>Cuotas</label><input type="number" id="tx-split-n" min="2" step="1" inputmode="numeric" placeholder="Ej. 12"></div>
+            <div class="field"><label>Cuota real <span class="muted">opcional</span></label><input type="number" id="tx-split-real" min="0" step="0.01" inputmode="decimal" placeholder="Si hay intereses"></div>
+          </div>
+          <div class="stat-sub" id="tx-split-hint" style="margin-top:8px; line-height:1.5;"></div>
+        </div>
+      </div>
               <div class="field qk-wide"><label>Categoría</label><select id="tx-category"></select></div>
               <div class="field qk-wide"><label>Fecha</label>
                 <div class="date-chip-row qk-date-row" style="margin:0;">
@@ -377,6 +393,27 @@
   </div>
 </div>
 
+<div class="modal-overlay" id="cycle-overlay" style="display:none;">
+  <div class="modal-panel">
+    <div class="modal-header">
+      <div class="section-title" style="margin-bottom:0;">Registrar renovación</div>
+      <button class="icon-btn" id="cycle-close" title="Cerrar">✕</button>
+    </div>
+    <div class="stat-sub" id="cycle-summary" style="margin:8px 0 14px;"></div>
+    <div class="field"><label>¿Qué día la pagaste?</label>
+      <div class="date-chip-row qk-date-row" style="margin:0;">
+        <div id="cy-date-chips" style="display:contents;"></div>
+        <label class="date-cal-btn" id="cy-date-cal" title="Elegir otra fecha">
+          <span id="cy-date-cal-label">📅</span>
+          <input type="date" id="cy-date">
+        </label>
+      </div>
+    </div>
+    <div class="stat-sub" id="cycle-next" style="margin-top:12px;"></div>
+    <button type="button" class="btn-primary" id="cycle-confirm" style="width:100%;">Registrar</button>
+  </div>
+</div>
+
 <div class="modal-overlay" id="quick-add-overlay" style="display:none;">
   <div class="modal-panel">
     <div class="modal-header">
@@ -392,6 +429,22 @@
       <div class="form-grid qk-block" id="qk-fields-normal">
         <div class="field"><label>Importe</label><input type="number" id="qk-amount" step="0.01" min="0" placeholder="0,00" inputmode="decimal"></div>
         <div class="field"><label>Cuenta</label><select id="qk-account"></select></div>
+      </div>
+      <div class="qk-block" id="qk-split-field" style="display:none;">
+        <div class="split-row"><div><div class="settings-label" style="font-size:13.5px;">Fraccionar este pago</div><div class="settings-desc" style="margin-top:2px;">En cuotas, con tu tarjeta</div></div><label class="switch"><input type="checkbox" id="qk-split-toggle"><span class="switch-slider"></span></label></div>
+        <div id="qk-split-body" style="display:none; margin-top:10px;">
+          <div class="date-chip-row" style="margin:0 0 10px;">
+            <button type="button" class="date-chip" data-split-n="3" data-split-target="qk">3</button>
+            <button type="button" class="date-chip" data-split-n="6" data-split-target="qk">6</button>
+            <button type="button" class="date-chip" data-split-n="12" data-split-target="qk">12</button>
+            <button type="button" class="date-chip" data-split-n="24" data-split-target="qk">24</button>
+          </div>
+          <div class="form-grid">
+            <div class="field"><label>Cuotas</label><input type="number" id="qk-split-n" min="2" step="1" inputmode="numeric" placeholder="Ej. 12"></div>
+            <div class="field"><label>Cuota real <span class="muted">opcional</span></label><input type="number" id="qk-split-real" min="0" step="0.01" inputmode="decimal" placeholder="Si hay intereses"></div>
+          </div>
+          <div class="stat-sub" id="qk-split-hint" style="margin-top:8px; line-height:1.5;"></div>
+        </div>
       </div>
       <div class="form-grid qk-block" id="qk-fields-transfer" style="display:none;">
         <div class="field"><label>Importe enviado</label><input type="number" id="qk-tr-amount-from" step="0.01" min="0" placeholder="0,00" inputmode="decimal"></div>

@@ -424,12 +424,16 @@ async function generateDueRecurring(){
   }
 }
 
+/* Siguiente cuota: mismo día de cada mes (el día de inicio), ajustado a fin de mes si no existe (29/30/31) */
+function installmentNextDate(it, fromISO){
+  return nextMonthlyOnDay(fromISO, Number((it.startDate || fromISO).slice(8,10)));
+}
 async function generateDueInstallments(){
   const today = todayISO();
   for(const it of state.installments){
     if(it.active===false) continue;
     if(it.paidInstallments >= it.totalInstallments){ it.active=false; await idb.put('installments', it); continue; }
-    let next = it.lastGenerated ? nextRecurringDate(it.lastGenerated, 'monthly') : it.startDate;
+    let next = it.lastGenerated ? installmentNextDate(it, it.lastGenerated) : it.startDate;
     let iterations = 0;
     let changed = false;
     while(next && next <= today && it.paidInstallments < it.totalInstallments && iterations < 36){
@@ -440,7 +444,7 @@ async function generateDueInstallments(){
       state.transactions.push(txRecord);
       if(it.debtId) await applyDebtPayment(it.debtId, cuotaAmount);
       it.lastGenerated = next;
-      next = nextRecurringDate(next, 'monthly');
+      next = installmentNextDate(it, next);
       changed = true;
       iterations++;
     }
@@ -936,16 +940,16 @@ function setupResumenLayoutSettings(){
 function cycleDueList(){
   return state.recurring.filter(r=> r.frequency==='cycle' && r.active!==false && !r.isTransfer);
 }
-async function registerCycle(id){
+async function registerCycle(id, dateISO){
   const r = state.recurring.find(x=>x.id===id);
   if(!r) return;
-  const today = todayISO();
+  const payDate = dateISO || todayISO();
   const days = Math.max(1, Number(r.cycleDays)||30);
-  const txRecord = {accountId:r.accountId, kind:r.kind, amount:r.amount, categoryId:r.categoryId, subcategory:r.subcategory||'', date:today, note:(r.note ? r.note+' · ' : '')+'Ciclo', debtId:r.debtId||null, debtEffect:r.debtId?(r.debtEffect||'payment'):null, source:'recurring'};
+  const txRecord = {accountId:r.accountId, kind:r.kind, amount:r.amount, categoryId:r.categoryId, subcategory:r.subcategory||'', date:payDate, note:(r.note ? r.note+' · ' : '')+'Ciclo', debtId:r.debtId||null, debtEffect:r.debtId?(r.debtEffect||'payment'):null, source:'recurring'};
   txRecord.id = await idb.put('transactions', txRecord);
   if(r.debtId) await applyDebtEffect(r.debtId, r.debtEffect||'payment', r.amount);
-  r.lastGenerated = today;
-  r.nextDue = addDaysISO(today, days);   // el siguiente ciclo cuenta desde el pago real
+  r.lastGenerated = payDate;
+  r.nextDue = addDaysISO(payDate, days);   // el siguiente ciclo cuenta desde el día real del pago
   await idb.put('recurring', r);
   await loadAll(); renderAll();
   toast('Registrado · próximo ' + fmtDate(r.nextDue));
@@ -959,7 +963,7 @@ async function postponeCycle(id, dateISO){
   toast('Pospuesto al ' + fmtDate(dateISO));
 }
 function cycleActionsHtml(r){
-  return `<button type="button" class="btn-secondary btn-sm" data-cycle-pay="${r.id}">Registrar hoy</button>
+  return `<button type="button" class="btn-secondary btn-sm" data-cycle-pay="${r.id}">Registrar</button>
     <label class="date-cal-btn" title="Posponer / cambiar fecha" style="margin-left:0; display:inline-flex; vertical-align:middle;"><span>📅 Posponer</span><input type="date" data-cycle-postpone="${r.id}" value="${cycleNextDue(r)}"></label>`;
 }
 /* Reparto del ingreso: prioritarios (fijos: recurrentes y cuotas) / variables / lo que sobra */
@@ -1071,7 +1075,7 @@ function projectRecurringOccurrences(r, fromDate, toDate){
 function projectInstallmentOccurrences(it, fromDate, toDate){
   const out = [];
   if(it.active===false) return out;
-  let next = it.lastGenerated ? nextRecurringDate(it.lastGenerated,'monthly') : it.startDate;
+  let next = it.lastGenerated ? installmentNextDate(it, it.lastGenerated) : it.startDate;
   let paid = it.paidInstallments;
   let iterations = 0;
   while(next && next <= toDate && paid < it.totalInstallments && iterations < 60){
@@ -1079,7 +1083,7 @@ function projectInstallmentOccurrences(it, fromDate, toDate){
       out.push({date:next, label:`${it.name} · Cuota ${paid+1}/${it.totalInstallments}`, amount:installmentAmountFor(it, paid), currency: getAccount(it.accountId)?.currency||state.baseCurrency, kind:'expense'});
     }
     paid++;
-    next = nextRecurringDate(next, 'monthly');
+    next = installmentNextDate(it, next);
     iterations++;
   }
   return out;
@@ -1589,6 +1593,7 @@ function renderMovimientos(){
 
   renderPeriodBar('mov-period', 'movPeriod', renderMovimientos);
   filterAndRenderTx();
+  updateSplitHint('tx');
 }
 
 function preferredAccountId(){
@@ -2142,7 +2147,7 @@ function renderMas(){
     state.installments.forEach(it=>{
       const acc = getAccount(it.accountId);
       const pct = it.totalInstallments>0 ? Math.min(100, it.paidInstallments/it.totalInstallments*100) : 0;
-      const nextDate = it.paidInstallments < it.totalInstallments ? (it.lastGenerated ? nextRecurringDate(it.lastGenerated,'monthly') : it.startDate) : null;
+      const nextDate = it.paidInstallments < it.totalInstallments ? (it.lastGenerated ? installmentNextDate(it, it.lastGenerated) : it.startDate) : null;
       const totals = installmentTotals(it);
       const curr = acc?acc.currency:state.baseCurrency;
       const div = document.createElement('div');
@@ -2427,10 +2432,163 @@ function setupGoals(){
   });
 }
 
-function setupCycleActions(){
+/* ===== Fraccionar un gasto de tarjeta en cuotas (p = 'qk' Añadir rápido, 'tx' Movimientos) ===== */
+function splitAccount(p){
+  const sel = document.getElementById(p+'-account');
+  return sel ? getAccount(Number(sel.value)) : null;
+}
+function splitAvailable(p){
+  const kind = p==='qk' ? state.qkType : state.txType;
+  if(kind!=='expense') return false;
+  if(p==='tx' && state.editingTxId) return false;
+  const a = splitAccount(p);
+  return !!a && a.type==='tarjeta_credito';
+}
+function splitActive(p){
+  const t = document.getElementById(p+'-split-toggle');
+  return !!t && t.checked && splitAvailable(p);
+}
+function splitValues(p){
+  const total = parseFloat(document.getElementById(p+'-amount').value);
+  const n = parseInt(document.getElementById(p+'-split-n').value, 10);
+  const real = parseFloat(document.getElementById(p+'-split-real').value);
+  return {total, n, real: real>0 ? real : null};
+}
+function splitSchedule(total, n, real){
+  return real ? new Array(n).fill(Math.round(real*100)/100) : buildEqualSchedule(total, n);
+}
+/* Corte al que entra una compra hecha en dateISO: el primer corte igual o posterior a esa fecha */
+function cutoffForPurchase(a, dateISO){
+  const cd = cutoffDayFor(a);
+  if(!cd) return null;
+  const d = new Date(dateISO+'T00:00:00');
+  let cutoff = localISO(dateForDayInMonth(d.getFullYear(), d.getMonth(), cd));
+  if(cutoff < dateISO) cutoff = nextMonthlyOnDay(cutoff, cd);
+  const pay = a.paymentDay ? paymentDateForCutoff(cutoff, a.paymentDay) : null;
+  return {cutoff, pay};
+}
+function updateSplitHint(p){
+  const field = document.getElementById(p+'-split-field');
+  if(!field) return;
+  const avail = splitAvailable(p);
+  const toggle = document.getElementById(p+'-split-toggle');
+  if(!avail) toggle.checked = false;
+  field.style.display = avail ? '' : 'none';
+  const on = avail && toggle.checked;
+  document.getElementById(p+'-split-body').style.display = on ? 'block' : 'none';
+  // una compra fraccionada no se liga a una deuda
+  const debtSel = document.getElementById(p+'-debt');
+  if(on){ debtSel.value = ''; updateDebtUI(p); }
+  const debtField = debtSel.closest('.field');
+  if(debtField) debtField.style.display = on ? 'none' : '';
+  const hint = document.getElementById(p+'-split-hint');
+  if(!on){ hint.textContent = ''; return; }
+  const nInput = document.getElementById(p+'-split-n').value;
+  document.querySelectorAll('[data-split-target="'+p+'"]').forEach(b=> b.classList.toggle('active', b.dataset.splitN===String(nInput)));
+  const {total, n, real} = splitValues(p);
+  if(!total || total<=0 || !n || n<2){ hint.textContent = 'Indica el importe y 2 cuotas o más.'; return; }
+  const acc = splitAccount(p), cur = acc.currency;
+  const sched = splitSchedule(total, n, real);
+  const sum = Math.round(sched.reduce((s,v)=>s+v,0)*100)/100;
+  let line;
+  if(real){
+    line = `${n} cuotas de ${fmtMoney(real, cur)} · total a pagar ${fmtMoney(sum, cur)}`;
+    const interest = Math.round((sum-total)*100)/100;
+    if(interest>0.004) line += ` · intereses ${fmtMoney(interest, cur)}`;
+    else if(interest<-0.004) line += ' · ojo: suma menos que el importe';
+  } else {
+    line = `${n} cuotas de ${fmtMoney(sched[0], cur)}` + (Math.abs(sched[n-1]-sched[0])>0.004 ? ' (la última ajusta el redondeo)' : '');
+  }
+  const date = document.getElementById(p+'-date').value || todayISO();
+  const c = cutoffForPurchase(acc, date);
+  line += '<br>Primera cuota el ' + fmtDate(date) + (c ? ', entra en el corte del ' + fmtDate(c.cutoff) + (c.pay ? ' (se paga el ' + fmtDate(c.pay) + ')' : '') : '') + '. Luego, el mismo día de cada mes.';
+  hint.innerHTML = line;
+}
+function resetSplit(p){
+  document.getElementById(p+'-split-toggle').checked = false;
+  document.getElementById(p+'-split-n').value = '';
+  document.getElementById(p+'-split-real').value = '';
+  updateSplitHint(p);
+}
+/* Crea la compra a plazos en lugar del gasto único (así no se cuenta dos veces) */
+async function createSplitPlan(p, accountId, categoryId, subcategory, dateISO, note){
+  const {total, n, real} = splitValues(p);
+  if(!total || total<=0){ toast('Introduce un importe válido'); return null; }
+  if(!n || n<2){ toast('Indica 2 cuotas o más'); return null; }
+  const cat = getCategory(categoryId);
+  const schedule = splitSchedule(total, n, real);
+  const sum = Math.round(schedule.reduce((s,v)=>s+v,0)*100)/100;
+  await idb.put('installments', {
+    name: note || (cat ? cat.name : 'Compra a plazos'),
+    accountId, amount: schedule[0], totalAmount: sum, schedule, totalInstallments: n, paidInstallments: 0,
+    categoryId, subcategory: subcategory || '', startDate: dateISO, lastGenerated: null,
+    note: '', person: '', debtId: null, active: true
+  });
+  await loadAll();
+  await generateDueInstallments();
+  await loadAll(); renderAll();
+  const acc = getAccount(accountId);
+  const interest = Math.round((sum-total)*100)/100;
+  toast(`Fraccionado en ${n} cuotas de ${fmtMoney(schedule[0], acc?acc.currency:state.baseCurrency)}` + (interest>0.004 ? ` · intereses ${fmtMoney(interest, acc?acc.currency:state.baseCurrency)}` : ''));
+  return {schedule, sum, interest};
+}
+function setupSplit(){
+  ['qk','tx'].forEach(p=>{
+    const refresh = ()=> updateSplitHint(p);
+    document.getElementById(p+'-account').addEventListener('change', refresh);
+    document.getElementById(p+'-split-toggle').addEventListener('change', refresh);
+    [p+'-amount', p+'-split-n', p+'-split-real'].forEach(id=> document.getElementById(id).addEventListener('input', refresh));
+    document.getElementById(p+'-date').addEventListener('change', refresh);
+    document.querySelectorAll('#'+p+'-type-toggle .type-btn').forEach(b=> b.addEventListener('click', refresh));
+  });
   document.addEventListener('click', (e)=>{
+    const b = e.target.closest('[data-split-n]');
+    if(!b) return;
+    const p = b.dataset.splitTarget;
+    document.getElementById(p+'-split-n').value = b.dataset.splitN;
+    updateSplitHint(p);
+  });
+}
+
+let cycleRegisterId = null;
+function cycleNextHint(dateISO){
+  const r = state.recurring.find(x=>x.id===cycleRegisterId);
+  if(!r) return;
+  const days = Math.max(1, Number(r.cycleDays)||30);
+  document.getElementById('cycle-next').textContent = 'El siguiente vencimiento será el ' + fmtDate(addDaysISO(dateISO, days)) + ' (' + days + ' días desde esa fecha).';
+}
+function openCycleRegister(id){
+  const r = state.recurring.find(x=>x.id===id);
+  if(!r) return;
+  cycleRegisterId = id;
+  const acc = getAccount(r.accountId), cat = getCategory(r.categoryId);
+  document.getElementById('cycle-summary').innerHTML = '<strong style="color:var(--text);">' + escapeHtml(r.note || (cat?cat.name:'Renovación')) + '</strong> · ' + fmtMoney(r.amount, acc?acc.currency:state.baseCurrency) + ' · cada ' + r.cycleDays + ' días';
+  document.getElementById('cy-date').max = todayISO();
+  setDateValue('cy', todayISO());
+  cycleNextHint(todayISO());
+  document.getElementById('cycle-overlay').style.display = 'flex';
+  pushOverlayState();
+}
+function setupCycleActions(){
+  document.getElementById('cycle-close').addEventListener('click', ()=> history.back());
+  document.getElementById('cycle-overlay').addEventListener('click', (e)=>{ if(e.target.id==='cycle-overlay') history.back(); });
+  document.getElementById('cy-date').addEventListener('change', (e)=>{
+    renderDateChips('cy');
+    if(e.target.value) cycleNextHint(e.target.value);
+  });
+  document.getElementById('cycle-confirm').addEventListener('click', async ()=>{
+    const id = cycleRegisterId;
+    const date = document.getElementById('cy-date').value || todayISO();
+    if(date > todayISO()){ toast('La fecha no puede ser futura; usa Posponer'); return; }
+    history.back();   // cierra la ventana
+    await registerCycle(id, date);
+  });
+  document.addEventListener('click', (e)=>{
+    // los chips se repintan al elegir, así que no se busca por ancestro (#cycle-overlay), sino por su destino
+    const pick = e.target.closest('[data-date-pick]');
+    if(pick && pick.dataset.dateTarget==='cy'){ cycleNextHint(pick.dataset.datePick); return; }
     const pay = e.target.closest('[data-cycle-pay]');
-    if(pay){ e.preventDefault(); registerCycle(Number(pay.dataset.cyclePay)); }
+    if(pay){ e.preventDefault(); openCycleRegister(Number(pay.dataset.cyclePay)); }
   });
   document.addEventListener('change', (e)=>{
     const pp = e.target.closest && e.target.closest('[data-cycle-postpone]');
@@ -2982,6 +3140,15 @@ function setupTxForm(){
     } else {
       const amount = parseFloat(document.getElementById('tx-amount').value);
       if(!amount || amount<=0){ toast('Introduce un importe válido'); return; }
+      if(splitActive('tx')){
+        const accId = Number(document.getElementById('tx-account').value);
+        const res = await createSplitPlan('tx', accId, Number(document.getElementById('tx-category').value), document.getElementById('tx-subcategory').value, document.getElementById('tx-date').value || todayISO(), document.getElementById('tx-note').value.trim());
+        if(!res) return;
+        document.getElementById('tx-amount').value=''; document.getElementById('tx-note').value='';
+        resetSplit('tx');
+        rememberAccount(accId);
+        return;
+      }
       const debtIdVal = document.getElementById('tx-debt').value;
       const debtEffect = state.txDebtMode;
       if(debtIdVal==='__new__' && !document.getElementById('tx-debt-newperson').value.trim()){ toast('Escribe el nombre de la persona'); return; }
@@ -3024,6 +3191,7 @@ function setupTxForm(){
 
 function enterEditMode(tx){
   state.editingTxId = tx.id;
+  updateSplitHint('tx');
   document.querySelectorAll('#tx-type-toggle .type-btn').forEach(b=>b.classList.toggle('active', b.dataset.type===tx.kind));
   state.txType = tx.kind;
   document.getElementById('tx-fields-normal').style.display = 'block';
@@ -3070,6 +3238,7 @@ function enterTransferEditMode(tr){
 function exitEditMode(){
   state.editingTxId = null;
   state.editingTransferId = null;
+  updateSplitHint('tx');
   document.getElementById('tx-form-title').textContent = 'Añadir movimiento';
   document.getElementById('tx-submit-btn').textContent = 'Guardar movimiento';
   document.getElementById('tx-cancel-edit').style.display = 'none';
@@ -3100,6 +3269,7 @@ function renderQuickAdd(){
     renderQkCategoryGrid();
   }
   setDateValue('qk', document.getElementById('qk-date').value || todayISO());
+  updateSplitHint('qk');
 }
 const QK_CATEGORY_LIMIT = 7;
 function renderQkCategoryGrid(){
@@ -3148,6 +3318,7 @@ function renderQkDateChips(){ renderDateChips('qk'); }
 function setDateValue(p, v){
   document.getElementById(p+'-date').value = v;
   renderDateChips(p);
+  if(p==='qk' || p==='tx') updateSplitHint(p);
 }
 /* Deuda relacionada: una sola lista con dos grupos; el tipo de movimiento se deduce de la opción elegida.
    p = 'qk' (Añadir rápido) o 'tx' (formulario de Movimientos) */
@@ -3273,6 +3444,17 @@ function setupQuickAdd(){
     }
     const amount = parseFloat(document.getElementById('qk-amount').value);
     if(!amount || amount<=0){ toast('Introduce un importe válido'); return; }
+    if(splitActive('qk')){
+      const accId = Number(document.getElementById('qk-account').value);
+      const res = await createSplitPlan('qk', accId, Number(document.getElementById('qk-category').value), document.getElementById('qk-subcategory').value, qkDate, document.getElementById('qk-note').value.trim());
+      if(!res) return;
+      document.getElementById('qk-amount').value=''; document.getElementById('qk-note').value='';
+      setDateValue('qk', todayISO());
+      resetSplit('qk');
+      rememberAccount(accId);
+      closeQuickAdd();
+      return;
+    }
     const debtIdVal = document.getElementById('qk-debt').value;
     if(debtIdVal==='__new__' && !document.getElementById('qk-debt-newperson').value.trim()){ toast('Escribe el nombre de la persona'); return; }
     const t = {
@@ -4021,6 +4203,7 @@ async function init(){
     setupLedgerSwipe();
     setupDetailModal();
     setupCycleActions();
+    setupSplit();
     document.addEventListener('change', (e)=>{
       if(e.target && e.target.id==='cashflow-range'){
         state.cashflowRange = e.target.value || '30';

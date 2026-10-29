@@ -325,3 +325,7 @@ input,select{font-family:inherit; min-width:0; max-width:100%;}
   #qk-form .form-grid .qk-wide, #tx-form .form-grid .qk-wide{grid-column:1 / -1;}
   #tx-form .field input, #tx-form .field select{min-width:0; width:100%;}
 }
+
+/* ===== Fraccionar un gasto de tarjeta ===== */
+.split-row{display:flex; justify-content:space-between; align-items:center; gap:12px; padding:10px 12px; background:var(--gold-soft); border:1px solid var(--rule); border-radius:10px;}
+.date-chip[data-split-n].active{background:var(--ink); border-color:var(--ink); color:#fff;}
