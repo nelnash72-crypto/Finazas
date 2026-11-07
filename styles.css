@@ -329,3 +329,9 @@ input,select{font-family:inherit; min-width:0; max-width:100%;}
 /* ===== Fraccionar un gasto de tarjeta ===== */
 .split-row{display:flex; justify-content:space-between; align-items:center; gap:12px; padding:10px 12px; background:var(--gold-soft); border:1px solid var(--rule); border-radius:10px;}
 .date-chip[data-split-n].active{background:var(--ink); border-color:var(--ink); color:#fff;}
+
+/* ===== Selector de periodo del gráfico de saldo ===== */
+.trend-info{display:flex; justify-content:space-between; font-size:11px; color:var(--text-faint); margin-top:4px;}
+.trend-info .neg{color:var(--over);}
+.trend-chips{margin:8px 0 0;}
+.trend-chips .date-chip.active{background:var(--ink); border-color:var(--ink); color:#fff;}

@@ -577,20 +577,30 @@ function totalBalanceBaseAsOf(asOfDate, includeHidden){
     return sum + toBase(accountBalanceAsOf(a.id, asOfDate), a.currency);
   }, 0);
 }
+const TREND_OPTIONS = [{days:30, label:'30 días'}, {days:90, label:'90 días'}, {days:365, label:'1 año'}];
+function getTrendDays(){
+  let d = 30;
+  try{ d = Number(localStorage.getItem('libro_trend_days')) || 30; }catch(e){}
+  return TREND_OPTIONS.some(o=>o.days===d) ? d : 30;
+}
 function computeBalanceTrend(days){
+  // máximo ~120 puntos: en rangos largos se toma un punto cada varios días (el último siempre es hoy)
+  const step = Math.max(1, Math.ceil(days/120));
   const points = [];
   const today = new Date(todayISO()+"T00:00:00");
-  for(let i=days-1;i>=0;i--){
+  for(let i=days-1;i>=0;i-=step){
     const d = new Date(today);
     d.setDate(d.getDate()-i);
     points.push(totalBalanceBaseAsOf(toISO(d)));
   }
+  if(((days-1) % step) !== 0) points.push(totalBalanceBaseAsOf(todayISO()));
   return points;
 }
 function renderBalanceTrend(){
   const svg = document.getElementById('balance-trend');
   if(!svg) return;
-  const points = computeBalanceTrend(30);
+  const days = getTrendDays();
+  const points = computeBalanceTrend(days);
   const w=300, h=56, pad=4;
   const min = Math.min(...points), max = Math.max(...points);
   const range = (max-min) || 1;
@@ -604,6 +614,16 @@ function renderBalanceTrend(){
   const fillPath = linePath + ` L${coords[coords.length-1][0].toFixed(1)},${h-pad} L${coords[0][0].toFixed(1)},${h-pad} Z`;
   svg.classList.toggle('neg', points[points.length-1] < 0);
   svg.innerHTML = `<path class="trend-fill" d="${fillPath}"></path><path class="trend-line" d="${linePath}"></path>`;
+  const chips = document.getElementById('trend-chips');
+  if(chips){
+    chips.innerHTML = TREND_OPTIONS.map(o=>`<button type="button" class="date-chip${o.days===days?' active':''}" data-trend-days="${o.days}">${o.label}</button>`).join('');
+  }
+  const info = document.getElementById('trend-info');
+  if(info){
+    const first = points[0], last = points[points.length-1], diff = last-first;
+    const from = new Date(todayISO()+'T00:00:00'); from.setDate(from.getDate()-(days-1));
+    info.innerHTML = `<span>${fmtDate(toISO(from))}</span><span class="${diff<0?'neg':''}">${diff>=0?'+':'−'}${fmtMoney(Math.abs(diff))}</span><span>Hoy</span>`;
+  }
 }
 
 /* ================= Period helpers ================= */
@@ -805,6 +825,8 @@ const RESUMEN_BLOCK_HTML = {
       <div class="balance-num" id="stat-balance">€0,00</div>
       <div class="balance-sub" id="balance-sub"></div>
       <svg class="balance-trend" id="balance-trend" viewBox="0 0 300 56" preserveAspectRatio="none"></svg>
+      <div class="trend-info" id="trend-info"></div>
+      <div class="date-chip-row trend-chips" id="trend-chips"></div>
       <div class="accounts-mini" id="accounts-mini"></div>
       <button class="link-btn" id="toggle-hidden-accts">Mostrar cuentas ocultas</button>
     </div>`,
@@ -2532,6 +2554,12 @@ async function createSplitPlan(p, accountId, categoryId, subcategory, dateISO, n
   toast(`Fraccionado en ${n} cuotas de ${fmtMoney(schedule[0], acc?acc.currency:state.baseCurrency)}` + (interest>0.004 ? ` · intereses ${fmtMoney(interest, acc?acc.currency:state.baseCurrency)}` : ''));
   return {schedule, sum, interest};
 }
+document.addEventListener('click', (e)=>{
+  const b = e.target.closest('[data-trend-days]');
+  if(!b) return;
+  try{ localStorage.setItem('libro_trend_days', b.dataset.trendDays); }catch(err){}
+  renderBalanceTrend();
+});
 function setupSplit(){
   ['qk','tx'].forEach(p=>{
     const refresh = ()=> updateSplitHint(p);
