@@ -591,39 +591,95 @@ function computeBalanceTrend(days){
   for(let i=days-1;i>=0;i-=step){
     const d = new Date(today);
     d.setDate(d.getDate()-i);
-    points.push(totalBalanceBaseAsOf(toISO(d)));
+    const iso = toISO(d);
+    points.push({date: iso, v: totalBalanceBaseAsOf(iso)});
   }
-  if(((days-1) % step) !== 0) points.push(totalBalanceBaseAsOf(todayISO()));
+  if(((days-1) % step) !== 0) points.push({date: todayISO(), v: totalBalanceBaseAsOf(todayISO())});
   return points;
+}
+let trendModel = null;
+function trendHeadDefault(){
+  const m = trendModel; if(!m) return '';
+  const diff = m.last - m.first;
+  const pct = m.first !== 0 ? (diff/Math.abs(m.first))*100 : null;
+  const sign = diff>=0 ? '+' : '−';
+  const label = TREND_OPTIONS.find(o=>o.days===m.days).label;
+  return `<span class="${diff<0?'down':'up'}">${diff>=0?'▲':'▼'} ${sign}${fmtMoney(Math.abs(diff))}` + (pct!==null ? ` · ${sign}${Math.abs(pct).toFixed(1).replace('.',',')} %` : '') + `</span> <span class="trend-period">en ${label}</span>`;
 }
 function renderBalanceTrend(){
   const svg = document.getElementById('balance-trend');
   if(!svg) return;
   const days = getTrendDays();
   const points = computeBalanceTrend(days);
-  const w=300, h=56, pad=4;
-  const min = Math.min(...points), max = Math.max(...points);
+  const W = Math.max(200, Math.round(svg.getBoundingClientRect().width) || 300), H = 110, padX = 4, padTop = 10, padBot = 8;
+  const vals = points.map(p=>p.v);
+  const min = Math.min(...vals), max = Math.max(...vals);
   const range = (max-min) || 1;
-  const stepX = points.length>1 ? (w-2*pad)/(points.length-1) : 0;
-  const coords = points.map((v,i)=>{
-    const x = pad + i*stepX;
-    const y = h-pad - ((v-min)/range)*(h-2*pad);
-    return [x,y];
-  });
+  const stepX = points.length>1 ? (W-2*padX)/(points.length-1) : 0;
+  const coords = points.map((p,i)=>[padX + i*stepX, H-padBot - ((p.v-min)/range)*(H-padTop-padBot)]);
   const linePath = coords.map((c,i)=> (i===0?'M':'L')+c[0].toFixed(1)+','+c[1].toFixed(1)).join(' ');
-  const fillPath = linePath + ` L${coords[coords.length-1][0].toFixed(1)},${h-pad} L${coords[0][0].toFixed(1)},${h-pad} Z`;
-  svg.classList.toggle('neg', points[points.length-1] < 0);
-  svg.innerHTML = `<path class="trend-fill" d="${fillPath}"></path><path class="trend-line" d="${linePath}"></path>`;
+  const fillPath = linePath + ` L${coords[coords.length-1][0].toFixed(1)},${H-padBot} L${coords[0][0].toFixed(1)},${H-padBot} Z`;
+  const first = vals[0], last = vals[vals.length-1];
+  const up = last >= first;
+  trendModel = {days, points, coords, first, last, W, H};
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.classList.toggle('down', !up);
+  svg.classList.toggle('neg', last < 0);
+  const baseY = coords[0][1].toFixed(1);
+  svg.innerHTML = `<defs><linearGradient id="trend-grad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" class="trend-stop" stop-opacity="0.28"/><stop offset="1" class="trend-stop" stop-opacity="0"/></linearGradient></defs>`
+    + `<line class="trend-base" x1="${padX}" x2="${W-padX}" y1="${baseY}" y2="${baseY}"></line>`
+    + `<path class="trend-fill" d="${fillPath}"></path><path class="trend-line" d="${linePath}"></path>`
+    + `<g class="trend-scrub" style="display:none"><line class="trend-cursor" y1="0" y2="${H}"></line><circle class="trend-dot" r="4.5"></circle></g>`;
+  const head = document.getElementById('trend-head');
+  if(head) head.innerHTML = trendHeadDefault();
   const chips = document.getElementById('trend-chips');
   if(chips){
     chips.innerHTML = TREND_OPTIONS.map(o=>`<button type="button" class="date-chip${o.days===days?' active':''}" data-trend-days="${o.days}">${o.label}</button>`).join('');
   }
   const info = document.getElementById('trend-info');
   if(info){
-    const first = points[0], last = points[points.length-1], diff = last-first;
-    const from = new Date(todayISO()+'T00:00:00'); from.setDate(from.getDate()-(days-1));
-    info.innerHTML = `<span>${fmtDate(toISO(from))}</span><span class="${diff<0?'neg':''}">${diff>=0?'+':'−'}${fmtMoney(Math.abs(diff))}</span><span>Hoy</span>`;
+    info.innerHTML = `<span>${fmtDate(points[0].date)}</span><span>Hoy</span>`;
   }
+}
+function trendScrub(e){
+  const m = trendModel, svg = document.getElementById('balance-trend');
+  if(!m || !svg) return;
+  const rect = svg.getBoundingClientRect();
+  const x = ((e.clientX - rect.left) / (rect.width || 1)) * m.W;
+  let idx = Math.round((x - 4) / ((m.W-8) / Math.max(1, m.points.length-1)));
+  idx = Math.max(0, Math.min(m.points.length-1, idx));
+  const [cx, cy] = m.coords[idx], p = m.points[idx];
+  const g = svg.querySelector('.trend-scrub');
+  g.style.display = '';
+  g.querySelector('.trend-cursor').setAttribute('x1', cx); g.querySelector('.trend-cursor').setAttribute('x2', cx);
+  const dot = g.querySelector('.trend-dot'); dot.setAttribute('cx', cx); dot.setAttribute('cy', cy);
+  const d = new Date(p.date+'T00:00:00').toLocaleDateString('es-ES',{weekday:'short', day:'numeric', month:'short', year:'numeric'});
+  document.getElementById('trend-head').innerHTML = `<span class="trend-hover">${fmtMoney(p.v)}</span> <span class="trend-period">${d}</span>`;
+}
+function trendScrubEnd(){
+  const svg = document.getElementById('balance-trend');
+  if(!svg) return;
+  const g = svg.querySelector('.trend-scrub'); if(g) g.style.display = 'none';
+  const head = document.getElementById('trend-head'); if(head) head.innerHTML = trendHeadDefault();
+}
+function setupTrendScrub(){
+  document.addEventListener('pointerdown', (e)=>{
+    const svg = e.target.closest && e.target.closest('#balance-trend');
+    if(!svg) return;
+    try{ svg.setPointerCapture(e.pointerId); }catch(err){}
+    trendScrub(e);
+  });
+  document.addEventListener('pointermove', (e)=>{
+    const svg = document.getElementById('balance-trend');
+    if(!svg) return;
+    if(e.pointerType==='mouse' || svg.hasPointerCapture?.(e.pointerId)){
+      if(e.pointerType==='mouse' && !(e.target.closest && e.target.closest('#balance-trend'))) return;
+      trendScrub(e);
+    }
+  });
+  ['pointerup','pointercancel'].forEach(t=> document.addEventListener(t, trendScrubEnd));
+  document.addEventListener('pointerout', (e)=>{ if(e.pointerType==='mouse' && e.target.id==='balance-trend') trendScrubEnd(); });
+  let rt; window.addEventListener('resize', ()=>{ clearTimeout(rt); rt = setTimeout(renderBalanceTrend, 150); });
 }
 
 /* ================= Period helpers ================= */
@@ -824,7 +880,8 @@ const RESUMEN_BLOCK_HTML = {
       <div class="balance-label">Saldo total</div>
       <div class="balance-num" id="stat-balance">€0,00</div>
       <div class="balance-sub" id="balance-sub"></div>
-      <svg class="balance-trend" id="balance-trend" viewBox="0 0 300 56" preserveAspectRatio="none"></svg>
+      <div class="trend-head" id="trend-head"></div>
+      <svg class="balance-trend" id="balance-trend" viewBox="0 0 300 110"></svg>
       <div class="trend-info" id="trend-info"></div>
       <div class="date-chip-row trend-chips" id="trend-chips"></div>
       <div class="accounts-mini" id="accounts-mini"></div>
@@ -2560,6 +2617,7 @@ document.addEventListener('click', (e)=>{
   try{ localStorage.setItem('libro_trend_days', b.dataset.trendDays); }catch(err){}
   renderBalanceTrend();
 });
+setupTrendScrub();
 function setupSplit(){
   ['qk','tx'].forEach(p=>{
     const refresh = ()=> updateSplitHint(p);

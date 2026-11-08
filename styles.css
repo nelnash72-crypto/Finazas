@@ -60,11 +60,19 @@ input,select{font-family:inherit; min-width:0; max-width:100%;}
 .balance-num{font-family:var(--font-mono); font-variant-numeric:tabular-nums; font-size:38px; font-weight:600; margin:8px 0 2px; letter-spacing:-0.5px;}
 .balance-num.neg{color:var(--over);}
 .balance-sub{font-size:12px; color:var(--text-soft);}
-.balance-trend{width:100%; height:44px; margin-top:8px; display:block;}
-.balance-trend path.trend-line{fill:none; stroke:var(--teal); stroke-width:2; stroke-linecap:round; stroke-linejoin:round;}
-.balance-trend path.trend-fill{stroke:none; fill:var(--teal); opacity:0.08;}
-.balance-trend.neg path.trend-line{stroke:var(--over);}
-.balance-trend.neg path.trend-fill{fill:var(--over);}
+.balance-trend{width:100%; height:110px; margin-top:6px; display:block; touch-action:pan-y; cursor:crosshair; --trend-color:var(--teal); user-select:none; -webkit-user-select:none;}
+.balance-trend.down{--trend-color:var(--over);}
+.balance-trend path.trend-line{fill:none; stroke:var(--trend-color); stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round;}
+.balance-trend path.trend-fill{stroke:none; fill:url(#trend-grad);}
+.balance-trend .trend-stop{stop-color:var(--trend-color);}
+.balance-trend .trend-base{stroke:var(--rule-strong); stroke-width:1; stroke-dasharray:3 4;}
+.balance-trend .trend-cursor{stroke:var(--text-faint); stroke-width:1;}
+.balance-trend .trend-dot{fill:var(--trend-color); stroke:var(--paper-raised); stroke-width:2;}
+.trend-head{margin-top:10px; min-height:22px; font-family:var(--font-mono); font-size:14px; font-weight:600;}
+.trend-head .up{color:var(--teal);} .trend-head .down{color:var(--over);}
+.trend-head .trend-period{font-family:var(--font-body); font-weight:400; font-size:12px; color:var(--text-faint); margin-left:4px;}
+.trend-head .trend-hover{font-size:15px;}
+
 .accounts-mini{margin-top:16px; border-top:1px solid var(--rule); padding-top:12px;}
 .acct-mini-row{display:flex; justify-content:space-between; align-items:center; padding:7px 0; font-size:13.5px;}
 .acct-mini-row .name{font-weight:600;}
@@ -331,7 +339,6 @@ input,select{font-family:inherit; min-width:0; max-width:100%;}
 .date-chip[data-split-n].active{background:var(--ink); border-color:var(--ink); color:#fff;}
 
 /* ===== Selector de periodo del gráfico de saldo ===== */
-.trend-info{display:flex; justify-content:space-between; font-size:11px; color:var(--text-faint); margin-top:4px;}
-.trend-info .neg{color:var(--over);}
+.trend-info{display:flex; justify-content:space-between; font-size:11px; color:var(--text-faint); margin-top:2px;}
 .trend-chips{margin:8px 0 0;}
 .trend-chips .date-chip.active{background:var(--ink); border-color:var(--ink); color:#fff;}
