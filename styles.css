@@ -359,3 +359,8 @@ input,select{font-family:inherit; min-width:0; max-width:100%;}
 .bars-chart .bar-exp{fill:var(--over);}
 .bars-chart .bars-hl{fill:var(--text-faint); opacity:.14;}
 .nw-chip.static{cursor:default;}
+
+/* ===== Guardar rápido arriba en Añadir rápido ===== */
+.qk-head-actions{display:flex; align-items:center; gap:8px;}
+.qk-save-mini{background:var(--teal); color:#fff; border:none; border-radius:999px; padding:7px 14px; font-family:var(--font-body); font-size:13px; font-weight:600; cursor:pointer; letter-spacing:.2px;}
+.qk-save-mini:active{transform:scale(.97);}
