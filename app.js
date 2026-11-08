@@ -578,7 +578,18 @@ function totalBalanceBaseAsOf(asOfDate, includeHidden){
   }, 0);
 }
 const TREND_OPTIONS = [{key:'month', label:'Mes actual', phrase:'este mes'}, {key:'30', label:'30 días', phrase:'30 días'}, {key:'90', label:'90 días', phrase:'90 días'}, {key:'365', label:'1 año', phrase:'1 año'}];
+const NW_OPTIONS = TREND_OPTIONS.concat([{key:'all', label:'Todo', phrase:'todo el historial'}]);
+function firstActivityDate(){
+  let first = todayISO();
+  state.transactions.forEach(t=>{ if(t.date && t.date < first) first = t.date; });
+  (state.transfers||[]).forEach(t=>{ if(t.date && t.date < first) first = t.date; });
+  return first;
+}
 function trendKeyToDays(key){
+  if(key==='all'){
+    const a = new Date(firstActivityDate()+'T00:00:00'), b = new Date(todayISO()+'T00:00:00');
+    return Math.max(2, Math.round((b-a)/86400000)+1);
+  }
   if(key==='month') return Math.max(2, Number(todayISO().slice(8,10)));  // del día 1 a hoy (mín. 2 puntos)
   return Number(key);
 }
@@ -877,6 +888,7 @@ const RESUMEN_BLOCKS_META = [
   {id:'avisos', label:'Avisos (tarjeta y renovaciones)'},
   {id:'patrimonio', label:'Patrimonio neto'},
   {id:'ingresos-gastos', label:'Ingresos y gastos'},
+  {id:'barras', label:'Ingresos y gastos por mes (barras)'},
   {id:'flujo-caja', label:'Proyección de flujo de caja'},
   {id:'movimientos', label:'Últimos movimientos'}
 ];
@@ -903,8 +915,13 @@ const RESUMEN_BLOCK_HTML = {
     </div>`,
   patrimonio: `<div class="card">
       <div class="section-title">Patrimonio neto <span class="muted">Incluye cuentas ocultas</span></div>
-      <div class="balance-num" id="networth-total" style="font-size:26px; margin-bottom:12px;">€0,00</div>
-      <div id="networth-breakdown"></div>
+      <div class="balance-num" id="networth-total" style="font-size:26px; margin-bottom:4px;">€0,00</div>
+      <div class="trend-head" id="nw-head"></div>
+      <svg class="balance-trend nw-chart" id="nw-chart" viewBox="0 0 300 130"></svg>
+      <div class="trend-info" id="nw-info"></div>
+      <div class="date-chip-row trend-chips" id="nw-chips"></div>
+      <div class="nw-legend" id="nw-legend"></div>
+      <div id="networth-breakdown" style="margin-top:14px;"></div>
     </div>`,
   'ingresos-gastos': `<div class="card">
       <div class="section-title">Ingresos y gastos</div>
@@ -931,6 +948,14 @@ const RESUMEN_BLOCK_HTML = {
       <div class="section-title" style="font-size:15px;">Gastos por categoría</div>
       <div class="chart-wrap" id="resumen-chart"></div>
     </div>`,
+  barras: `<div class="card">
+      <div class="section-title">Ingresos y gastos por mes</div>
+      <div class="trend-head" id="bars-head"></div>
+      <svg class="balance-trend bars-chart" id="bars-chart" viewBox="0 0 300 130"></svg>
+      <div class="trend-info" id="bars-info"></div>
+      <div class="date-chip-row trend-chips" id="bars-chips"></div>
+      <div class="nw-legend" id="bars-legend"></div>
+    </div>`,
   'flujo-caja': `<div class="card">
       <div class="section-title">Proyección de flujo de caja <select id="cashflow-range" style="font-family:var(--font-body); font-size:12.5px; font-weight:500; border:1px solid var(--rule-strong); border-radius:7px; padding:5px 8px; background:var(--paper);">
         <option value="30" __SEL30__>Próximos 30 días</option>
@@ -954,7 +979,13 @@ function getResumenLayout(){
   const validIds = new Set(RESUMEN_BLOCKS_META.map(b=>b.id));
   const merged = saved.filter(x=>validIds.has(x.id));
   const mergedIds = new Set(merged.map(x=>x.id));
-  RESUMEN_BLOCKS_META.forEach(b=>{ if(!mergedIds.has(b.id)) merged.push({id:b.id, visible:true}); });
+  // los bloques nuevos entran justo después del que les precede en la lista original
+  RESUMEN_BLOCKS_META.forEach((b,i)=>{
+    if(mergedIds.has(b.id)) return;
+    const prev = i>0 ? merged.findIndex(x=>x.id===RESUMEN_BLOCKS_META[i-1].id) : -1;
+    merged.splice(prev>=0 ? prev+1 : merged.length, 0, {id:b.id, visible:true});
+    mergedIds.add(b.id);
+  });
   return merged;
 }
 function renderResumenBlocksContainer(){
@@ -1240,7 +1271,255 @@ function renderCashflow(){
   }).join('');
 }
 
+/* ===== Gráfico de patrimonio: patrimonio neto, activos y deudas en el tiempo ===== */
+const NW_SERIES = [
+  {id:'net', label:'Patrimonio', color:'var(--teal)', width:2.2},
+  {id:'assets', label:'Activos', color:'var(--gold)', width:1.4},
+  {id:'debts', label:'Deudas', color:'var(--over)', width:1.4}
+];
+let nwHidden = new Set();
+let nwModel = null;
+function getNwKey(){
+  let k = '30';
+  try{ k = localStorage.getItem('libro_nw_days') || '30'; }catch(e){}
+  return NW_OPTIONS.some(o=>o.key===k) ? k : '30';
+}
+function computeNetWorthSeries(days){
+  const step = Math.max(1, Math.ceil(days/120));
+  const dates = [];
+  const today = new Date(todayISO()+'T00:00:00');
+  for(let i=days-1;i>=0;i-=step){ const d = new Date(today); d.setDate(d.getDate()-i); dates.push(toISO(d)); }
+  if(((days-1) % step) !== 0) dates.push(todayISO());
+  return dates.map(date=>{
+    let assets = 0, debts = 0;
+    state.accounts.forEach(a=>{
+      const v = toBase(accountBalanceAsOf(a.id, date), a.currency);
+      if(v>=0) assets += v; else debts += v;   // deudas = saldos negativos (p. ej. tarjetas)
+    });
+    return {date, assets, debts, net: assets+debts};
+  });
+}
+function nwHeadDefault(){
+  const m = nwModel; if(!m) return '';
+  const first = m.points[0].net, last = m.points[m.points.length-1].net, diff = last-first;
+  const pct = first !== 0 ? (diff/Math.abs(first))*100 : null;
+  const sign = diff>=0 ? '+' : '−';
+  const phrase = NW_OPTIONS.find(o=>o.key===m.key).phrase;
+  return `<span class="${diff<0?'down':'up'}">${diff>=0?'▲':'▼'} ${sign}${fmtMoney(Math.abs(diff))}` + (pct!==null ? ` · ${sign}${Math.abs(pct).toFixed(1).replace('.',',')} %` : '') + `</span> <span class="trend-period">en ${phrase}</span>`;
+}
+function renderNwLegend(idx){
+  const el = document.getElementById('nw-legend'); if(!el || !nwModel) return;
+  const p = nwModel.points[idx==null ? nwModel.points.length-1 : idx];
+  el.innerHTML = NW_SERIES.map(sr=>{
+    const off = nwHidden.has(sr.id);
+    return `<button type="button" class="nw-chip${off?' off':''}" data-nw-series="${sr.id}"><span class="nw-dot" style="background:${sr.color}"></span><span class="nw-name">${sr.label}</span><span class="nw-val">${fmtMoney(p[sr.id])}</span></button>`;
+  }).join('');
+}
+function renderNetChart(){
+  const svg = document.getElementById('nw-chart');
+  if(!svg) return;
+  const key = getNwKey(), days = trendKeyToDays(key);
+  const points = computeNetWorthSeries(days);
+  const hasDebts = points.some(p=>p.debts!==0);
+  const W = Math.max(200, Math.round(svg.getBoundingClientRect().width) || 300), H = 130, padX = 4, padTop = 10, padBot = 8;
+  const visible = NW_SERIES.filter(sr=> !nwHidden.has(sr.id) && (sr.id!=='debts' || hasDebts));
+  const all = visible.length ? visible.flatMap(sr=> points.map(p=>p[sr.id])) : [0,1];
+  const min = Math.min(...all), max = Math.max(...all), range = (max-min) || 1;
+  const stepX = points.length>1 ? (W-2*padX)/(points.length-1) : 0;
+  const yOf = v => H-padBot - ((v-min)/range)*(H-padTop-padBot);
+  const xOf = i => padX + i*stepX;
+  nwModel = {key, days, points, W, H, xOf, yOf, visible};
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  const net = points.map(p=>p.net), up = net[net.length-1] >= net[0];
+  svg.classList.toggle('down', !up);
+  const pathOf = id => points.map((p,i)=> (i===0?'M':'L')+xOf(i).toFixed(1)+','+yOf(p[id]).toFixed(1)).join(' ');
+  let html = `<defs><linearGradient id="nw-grad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" class="trend-stop" stop-opacity="0.22"/><stop offset="1" class="trend-stop" stop-opacity="0"/></linearGradient></defs>`;
+  if(min<0 && max>0) html += `<line class="trend-base" x1="${padX}" x2="${W-padX}" y1="${yOf(0).toFixed(1)}" y2="${yOf(0).toFixed(1)}"></line>`;
+  if(visible.some(sr=>sr.id==='net')){
+    const line = pathOf('net');
+    html += `<path class="trend-fill" style="fill:url(#nw-grad)" d="${line} L${xOf(points.length-1).toFixed(1)},${H-padBot} L${xOf(0).toFixed(1)},${H-padBot} Z"></path>`;
+  }
+  visible.slice().reverse().forEach(sr=>{ html += `<path class="nw-line" d="${pathOf(sr.id)}" style="stroke:${sr.color}; stroke-width:${sr.width}"></path>`; });
+  html += `<g class="trend-scrub" style="display:none"><line class="trend-cursor" y1="0" y2="${H}"></line>${visible.map(sr=>`<circle class="trend-dot" data-s="${sr.id}" r="4" style="fill:${sr.color}"></circle>`).join('')}</g>`;
+  svg.innerHTML = html;
+  const head = document.getElementById('nw-head'); if(head) head.innerHTML = nwHeadDefault();
+  const chips = document.getElementById('nw-chips');
+  if(chips) chips.innerHTML = NW_OPTIONS.map(o=>`<button type="button" class="date-chip${o.key===key?' active':''}" data-nw-days="${o.key}">${o.label}</button>`).join('');
+  const info = document.getElementById('nw-info');
+  if(info) info.innerHTML = `<span>${fmtDate(points[0].date)}</span><span>Hoy</span>`;
+  renderNwLegend();
+}
+function nwScrub(e){
+  const m = nwModel, svg = document.getElementById('nw-chart'); if(!m||!svg) return;
+  const rect = svg.getBoundingClientRect();
+  const x = ((e.clientX - rect.left) / (rect.width || 1)) * m.W;
+  let idx = Math.round((x - 4) / ((m.W-8) / Math.max(1, m.points.length-1)));
+  idx = Math.max(0, Math.min(m.points.length-1, idx));
+  const p = m.points[idx], cx = m.xOf(idx);
+  const g = svg.querySelector('.trend-scrub'); g.style.display = '';
+  const cur = g.querySelector('.trend-cursor'); cur.setAttribute('x1', cx); cur.setAttribute('x2', cx);
+  g.querySelectorAll('.trend-dot').forEach(c=>{ c.setAttribute('cx', cx); c.setAttribute('cy', m.yOf(p[c.dataset.s])); });
+  const d = new Date(p.date+'T00:00:00').toLocaleDateString('es-ES',{weekday:'short', day:'numeric', month:'short', year:'numeric'});
+  document.getElementById('nw-head').innerHTML = `<span class="trend-hover">${fmtMoney(p.net)}</span> <span class="trend-period">${d}</span>`;
+  renderNwLegend(idx);
+}
+function nwScrubEnd(){
+  const svg = document.getElementById('nw-chart'); if(!svg) return;
+  const g = svg.querySelector('.trend-scrub'); if(g) g.style.display = 'none';
+  const head = document.getElementById('nw-head'); if(head) head.innerHTML = nwHeadDefault();
+  renderNwLegend();
+}
+function setupNwChart(){
+  document.addEventListener('pointerdown', (e)=>{
+    const svg = e.target.closest && e.target.closest('#nw-chart'); if(!svg) return;
+    try{ svg.setPointerCapture(e.pointerId); }catch(err){}
+    nwScrub(e);
+  });
+  document.addEventListener('pointermove', (e)=>{
+    const svg = document.getElementById('nw-chart'); if(!svg) return;
+    if(e.pointerType==='mouse'){ if(e.target.closest && e.target.closest('#nw-chart')) nwScrub(e); }
+    else if(svg.hasPointerCapture && svg.hasPointerCapture(e.pointerId)) nwScrub(e);
+  });
+  ['pointerup','pointercancel'].forEach(t=> document.addEventListener(t, nwScrubEnd));
+  document.addEventListener('pointerout', (e)=>{ if(e.pointerType==='mouse' && e.target.id==='nw-chart') nwScrubEnd(); });
+  document.addEventListener('click', (e)=>{
+    const pb = e.target.closest('[data-nw-days]');
+    if(pb){ try{ localStorage.setItem('libro_nw_days', pb.dataset.nwDays); }catch(err){} renderNetChart(); return; }
+    const sb = e.target.closest('[data-nw-series]');
+    if(sb){
+      const id = sb.dataset.nwSeries;
+      if(nwHidden.has(id)) nwHidden.delete(id); else if(nwHidden.size < NW_SERIES.length-1) nwHidden.add(id);
+      renderNetChart();
+    }
+  });
+  let rt; window.addEventListener('resize', ()=>{ clearTimeout(rt); rt = setTimeout(renderNetChart, 150); });
+}
+setupNwChart();
+/* ===== Barras: ingresos y gastos por día (mes actual / 30 días) o por mes (6 / 12 meses / todo) ===== */
+const BARS_OPTIONS = [
+  {key:'month', label:'Mes actual', phrase:'este mes'},
+  {key:'30', label:'30 días', phrase:'30 días'},
+  {key:'6m', label:'6 meses', phrase:'6 meses'},
+  {key:'12m', label:'12 meses', phrase:'12 meses'},
+  {key:'all', label:'Todo', phrase:'todo el historial'}
+];
+let barsModel = null, barsSel = null;
+function getBarsKey(){
+  let k = 'month';
+  try{ k = localStorage.getItem('libro_bars_key') || 'month'; }catch(e){}
+  return BARS_OPTIONS.some(o=>o.key===k) ? k : 'month';
+}
+function computeBarsBuckets(key){
+  const today = new Date(todayISO()+'T00:00:00');
+  const buckets = [];
+  const mk = (id, label, from, to)=> buckets.push({id, label, from, to, inc:0, exp:0});
+  if(key==='month' || key==='30'){
+    const n = key==='month' ? today.getDate() : 30;
+    for(let i=n-1;i>=0;i--){
+      const d = new Date(today); d.setDate(d.getDate()-i); const iso = toISO(d);
+      mk(iso, new Date(iso+'T00:00:00').toLocaleDateString('es-ES',{weekday:'short', day:'numeric', month:'short'}), iso, iso);
+    }
+    buckets.mode = 'day';
+  } else {
+    let n = key==='6m' ? 6 : 12;
+    if(key==='all'){
+      const f = new Date(firstActivityDate()+'T00:00:00');
+      n = Math.max(1, (today.getFullYear()-f.getFullYear())*12 + today.getMonth()-f.getMonth() + 1);
+    }
+    for(let i=n-1;i>=0;i--){
+      const d = new Date(today.getFullYear(), today.getMonth()-i, 1);
+      const ym = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');
+      mk(ym, cap(d.toLocaleDateString('es-ES',{month:'long', year:'numeric'})), ym+'-01', ym+'-31');
+    }
+    buckets.mode = 'month';
+  }
+  const idx = {}; buckets.forEach((b,i)=> idx[b.id]=i);
+  state.transactions.forEach(t=>{
+    if(t.kind!=='income' && t.kind!=='expense') return;
+    const id = buckets.mode==='day' ? t.date : (t.date||'').slice(0,7);
+    const i = idx[id]; if(i===undefined) return;
+    const acc = getAccount(t.accountId);
+    const v = toBase(t.amount, acc?acc.currency:state.baseCurrency);
+    if(t.kind==='income') buckets[i].inc += v; else buckets[i].exp += v;
+  });
+  return buckets;
+}
+function barsHead(sel){
+  const m = barsModel; if(!m) return '';
+  if(sel!=null){ const b = m.buckets[sel]; return `<span class="trend-hover">${fmtMoney(b.inc-b.exp)}</span> <span class="trend-period">${b.label}</span>`; }
+  const inc = m.buckets.reduce((s,b)=>s+b.inc,0), exp = m.buckets.reduce((s,b)=>s+b.exp,0), net = inc-exp;
+  return `<span class="${net<0?'down':'up'}">${net>=0?'▲':'▼'} ${net>=0?'+':'−'}${fmtMoney(Math.abs(net))}</span> <span class="trend-period">balance en ${BARS_OPTIONS.find(o=>o.key===m.key).phrase}</span>`;
+}
+function renderBarsLegend(sel){
+  const el = document.getElementById('bars-legend'); if(!el || !barsModel) return;
+  const src = sel!=null ? [barsModel.buckets[sel]] : barsModel.buckets;
+  const inc = src.reduce((s,b)=>s+b.inc,0), exp = src.reduce((s,b)=>s+b.exp,0);
+  const chip = (c,name,val)=>`<span class="nw-chip static"><span class="nw-dot" style="background:${c}"></span><span class="nw-name">${name}</span><span class="nw-val">${fmtMoney(val)}</span></span>`;
+  el.innerHTML = chip('var(--teal)','Ingresos',inc) + chip('var(--over)','Gastos',exp) + chip('var(--gold)','Neto',inc-exp);
+}
+function renderBarsChart(){
+  const svg = document.getElementById('bars-chart'); if(!svg) return;
+  const key = getBarsKey();
+  const buckets = computeBarsBuckets(key);
+  const W = Math.max(200, Math.round(svg.getBoundingClientRect().width) || 300), H = 130, padX = 4, padTop = 8, padBot = 6;
+  const max = Math.max(1, ...buckets.map(b=>Math.max(b.inc,b.exp)));
+  const slot = (W-2*padX)/buckets.length;
+  const bw = Math.max(1.5, Math.min(14, slot*0.38));
+  const hOf = v => (v/max)*(H-padTop-padBot);
+  barsModel = {key, buckets, W, H, slot, padX};
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  let html = `<line class="trend-base" x1="${padX}" x2="${W-padX}" y1="${H-padBot}" y2="${H-padBot}" style="stroke-dasharray:none"></line><rect class="bars-hl" x="0" y="0" width="${slot}" height="${H}" style="display:none"></rect>`;
+  buckets.forEach((b,i)=>{
+    const cx = padX + slot*i + slot/2;
+    if(b.inc>0) html += `<rect class="bar-inc" x="${(cx-bw-0.5).toFixed(1)}" y="${(H-padBot-hOf(b.inc)).toFixed(1)}" width="${bw.toFixed(1)}" height="${hOf(b.inc).toFixed(1)}" rx="1.5"></rect>`;
+    if(b.exp>0) html += `<rect class="bar-exp" x="${(cx+0.5).toFixed(1)}" y="${(H-padBot-hOf(b.exp)).toFixed(1)}" width="${bw.toFixed(1)}" height="${hOf(b.exp).toFixed(1)}" rx="1.5"></rect>`;
+  });
+  svg.innerHTML = html;
+  const short = b => buckets.mode==='day' ? fmtDate(b.id) : cap(new Date(b.id+'-01T00:00:00').toLocaleDateString('es-ES',{month:'short', year:'2-digit'}));
+  document.getElementById('bars-head').innerHTML = barsHead(null);
+  document.getElementById('bars-info').innerHTML = `<span>${short(buckets[0])}</span><span>${short(buckets[buckets.length-1])}</span>`;
+  document.getElementById('bars-chips').innerHTML = BARS_OPTIONS.map(o=>`<button type="button" class="date-chip${o.key===key?' active':''}" data-bars-key="${o.key}">${o.label}</button>`).join('');
+  renderBarsLegend(null);
+}
+function barsScrub(e){
+  const m = barsModel, svg = document.getElementById('bars-chart'); if(!m||!svg) return;
+  const rect = svg.getBoundingClientRect();
+  const x = ((e.clientX - rect.left) / (rect.width || 1)) * m.W;
+  const i = Math.max(0, Math.min(m.buckets.length-1, Math.floor((x - m.padX)/m.slot)));
+  const hl = svg.querySelector('.bars-hl'); hl.style.display=''; hl.setAttribute('x', m.padX + m.slot*i);
+  document.getElementById('bars-head').innerHTML = barsHead(i);
+  renderBarsLegend(i);
+}
+function barsScrubEnd(){
+  const svg = document.getElementById('bars-chart'); if(!svg) return;
+  const hl = svg.querySelector('.bars-hl'); if(hl) hl.style.display='none';
+  const h = document.getElementById('bars-head'); if(h) h.innerHTML = barsHead(null);
+  renderBarsLegend(null);
+}
+function setupBarsChart(){
+  document.addEventListener('pointerdown', (e)=>{
+    const svg = e.target.closest && e.target.closest('#bars-chart'); if(!svg) return;
+    try{ svg.setPointerCapture(e.pointerId); }catch(err){}
+    barsScrub(e);
+  });
+  document.addEventListener('pointermove', (e)=>{
+    const svg = document.getElementById('bars-chart'); if(!svg) return;
+    if(e.pointerType==='mouse'){ if(e.target.closest && e.target.closest('#bars-chart')) barsScrub(e); }
+    else if(svg.hasPointerCapture && svg.hasPointerCapture(e.pointerId)) barsScrub(e);
+  });
+  ['pointerup','pointercancel'].forEach(t=> document.addEventListener(t, barsScrubEnd));
+  document.addEventListener('pointerout', (e)=>{ if(e.pointerType==='mouse' && e.target.id==='bars-chart') barsScrubEnd(); });
+  document.addEventListener('click', (e)=>{
+    const b = e.target.closest('[data-bars-key]'); if(!b) return;
+    try{ localStorage.setItem('libro_bars_key', b.dataset.barsKey); }catch(err){}
+    renderBarsChart();
+  });
+  let rt; window.addEventListener('resize', ()=>{ clearTimeout(rt); rt = setTimeout(renderBarsChart, 150); });
+}
+setupBarsChart();
 function renderNetWorth(){
+  renderBarsChart();
+  renderNetChart();
   const totalEl = document.getElementById('networth-total');
   const el = document.getElementById('networth-breakdown');
   if(!totalEl || !el) return;

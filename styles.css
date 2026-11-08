@@ -342,3 +342,20 @@ input,select{font-family:inherit; min-width:0; max-width:100%;}
 .trend-info{display:flex; justify-content:space-between; font-size:11px; color:var(--text-faint); margin-top:2px;}
 .trend-chips{margin:8px 0 0;}
 .trend-chips .date-chip.active{background:var(--ink); border-color:var(--ink); color:#fff;}
+
+/* ===== Gráfico de patrimonio (varias líneas) ===== */
+.nw-chart{height:130px;}
+.balance-trend .nw-line{fill:none; stroke-linecap:round; stroke-linejoin:round;}
+.nw-legend{display:flex; gap:8px; flex-wrap:wrap; margin-top:10px;}
+.nw-chip{display:flex; align-items:center; gap:6px; padding:6px 10px; border:1px solid var(--rule-strong); border-radius:999px; background:var(--paper-raised); color:var(--text); font-size:12px; font-family:var(--font-body); cursor:pointer;}
+.nw-chip .nw-dot{width:9px; height:9px; border-radius:50%; flex:none;}
+.nw-chip .nw-val{font-family:var(--font-mono); font-weight:600;}
+.nw-chip.off{opacity:.45;}
+.nw-chip.off .nw-name{text-decoration:line-through;}
+
+/* ===== Barras de ingresos y gastos ===== */
+.bars-chart{height:130px;}
+.bars-chart .bar-inc{fill:var(--teal);}
+.bars-chart .bar-exp{fill:var(--over);}
+.bars-chart .bars-hl{fill:var(--text-faint); opacity:.14;}
+.nw-chip.static{cursor:default;}
