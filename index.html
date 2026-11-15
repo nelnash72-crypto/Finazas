@@ -144,6 +144,7 @@
       <div class="card">
         <div class="section-title">Historial</div>
         <div class="period-bar" id="mov-period"></div>
+        <div class="date-chip-row" id="mov-quick" style="margin:0 0 12px;"></div>
         <div class="filters">
           <select id="filter-account"><option value="all">Todas las cuentas</option></select>
           <select id="filter-type">
@@ -154,6 +155,22 @@
           </select>
           <select id="filter-category"><option value="all">Todas las categorías</option></select>
           <input type="text" id="filter-search" placeholder="Buscar por nota o categoría..." style="border:1px solid var(--rule-strong); border-radius:7px; padding:8px 10px; font-size:13.5px; flex:1; min-width:180px;">
+        </div>
+        <div class="filters" id="mov-tools">
+          <input type="number" id="filter-min" min="0" step="0.01" inputmode="decimal" placeholder="Monto desde">
+          <input type="number" id="filter-max" min="0" step="0.01" inputmode="decimal" placeholder="Hasta">
+          <select id="filter-group"><option value="date">Agrupar: por fecha</option><option value="category">Agrupar: por categoría</option></select>
+          <button type="button" class="btn-secondary btn-sm" id="sel-toggle">Seleccionar</button>
+        </div>
+        <div class="stat-sub" id="mov-summary" style="margin-bottom:10px;"></div>
+        <div class="sel-bar" id="sel-bar" style="display:none;">
+          <div class="sel-count" id="sel-count"></div>
+          <div class="sel-actions">
+            <button type="button" class="btn-secondary btn-sm" id="sel-all">Todos</button>
+            <select id="sel-cat"></select>
+            <select id="sel-acc"></select>
+            <button type="button" class="btn-secondary btn-sm btn-danger" id="sel-del">Eliminar</button>
+          </div>
         </div>
         <div class="ledger" id="tx-list"></div>
         <div id="search-extra-results"></div>
@@ -267,6 +284,20 @@
         <div class="page-title">Más</div>
       </div>
 
+      <div class="card" id="report-card">
+        <div class="section-title">Informe <span class="muted">Tendencias por periodo y categoría</span></div>
+        <div class="date-chip-row" id="rp-chips" style="margin:0 0 10px;"></div>
+        <div class="date-chip-row" id="rp-type" style="margin:0 0 14px;"></div>
+        <div class="grid-3" id="rp-totals" style="margin-bottom:14px;"></div>
+        <div class="stat-sub" id="rp-sub"></div>
+        <div class="trend-head" id="rp-head"></div>
+        <svg class="rp-chart" id="rp-chart" viewBox="0 0 320 150"></svg>
+        <div class="stat-sub" id="rp-trend" style="margin-bottom:16px;"></div>
+        <div class="section-title" style="font-size:15px;">Por categoría <span class="muted">Toca una para ver solo su tendencia</span></div>
+        <div id="rp-cats"></div>
+        <div style="margin-top:14px;"><button type="button" class="btn-secondary btn-sm" id="rp-print">Imprimir / guardar PDF</button></div>
+      </div>
+
       <div class="card">
         <div class="section-title">Metas de ahorro <button type="button" class="card-add-btn" id="open-goal-modal" title="Añadir meta">+</button></div>
         <div id="goals-list"></div>
@@ -365,6 +396,23 @@
         <div class="settings-row">
           <div><div class="settings-label">Borrar todos los datos</div><div class="settings-desc">Esta acción no se puede deshacer</div></div>
           <button class="btn-secondary btn-danger" id="reset-btn">Borrar todo</button>
+        </div>
+      </div>
+
+      <div class="card" id="autobackup-card">
+        <div class="section-title">Respaldo automático <span class="muted">copias en una carpeta</span></div>
+        <div id="autobackup-controls" style="display:none;">
+          <div class="settings-desc" id="autobackup-status" style="margin-bottom:12px;"></div>
+          <div class="btn-row">
+            <button class="btn-secondary" id="autobackup-choose-btn">Elegir carpeta</button>
+            <button class="btn-secondary" id="autobackup-now-btn" style="display:none;">Respaldar ahora</button>
+            <button class="btn-secondary btn-danger" id="autobackup-stop-btn" style="display:none;">Dejar de respaldar</button>
+          </div>
+        </div>
+        <div class="settings-desc" id="autobackup-unsupported" style="margin-bottom:4px;">Este navegador no puede guardar copias solo en una carpeta (en el móvil funciona así). Usa <strong>Exportar</strong>: con un toque la compartes a tu nube o la descargas, y la app te avisa cuando pasen varios días sin copia.</div>
+        <div class="settings-row" style="margin-top:14px;">
+          <div><div class="settings-label">Avisarme si pasan</div><div class="settings-desc">días sin ninguna copia de seguridad</div></div>
+          <select id="backup-reminder-days"><option value="3">3 días</option><option value="7">7 días</option><option value="14">14 días</option><option value="30">30 días</option></select>
         </div>
       </div>
 

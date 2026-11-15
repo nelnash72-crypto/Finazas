@@ -42,9 +42,9 @@ function tx(store, mode){ return db.transaction(store, mode).objectStore(store);
 function p(req){ return new Promise((res, rej)=>{ req.onsuccess=()=>res(req.result); req.onerror=()=>rej(req.error); }); }
 const idb = {
   getAll: (s)=> p(tx(s,'readonly').getAll()),
-  put: (s,v)=> p(tx(s,'readwrite').put(v)),
-  delete: (s,k)=> p(tx(s,'readwrite').delete(k)),
-  clear: (s)=> p(tx(s,'readwrite').clear()),
+  put: (s,v)=> p(tx(s,'readwrite').put(v)).then(r=>{ noteDataChanged(s); return r; }),
+  delete: (s,k)=> p(tx(s,'readwrite').delete(k)).then(r=>{ noteDataChanged(s); return r; }),
+  clear: (s)=> p(tx(s,'readwrite').clear()).then(r=>{ noteDataChanged(s); return r; }),
 };
 
 /* ================= Constants ================= */
@@ -116,6 +116,7 @@ let state = {
   lastBackupDate:null, backupReminderShown:false, editingTxId:null, editingTransferId:null, accentColor:'#A5842E', darkMode:false, textScale:100, iconPickerTarget:null, generalBudget:0,
   resumenPeriod:{mode:'month', ref:todayISO()},
   movPeriod:{mode:'month', ref:todayISO()},
+  movGroup:'date', selMode:false, sel:new Set(), collapsedCats:new Set(),
 };
 
 function todayISO(){ return localISO(new Date()); }
@@ -212,6 +213,8 @@ async function loadAll(){
   if(baseSetting) state.baseCurrency = baseSetting.value;
   const rateSetting = settings.find(s=>s.key==='rateOverrides');
   if(rateSetting) state.rateOverrides = rateSetting.value || {};
+  const remDaysSetting = settings.find(s=>s.key==='backupReminderDays');
+  state.backupReminderDays = remDaysSetting && [3,7,14,30].includes(Number(remDaysSetting.value)) ? Number(remDaysSetting.value) : 7;
   const backupSetting = settings.find(s=>s.key==='lastBackupDate');
   state.lastBackupDate = backupSetting ? backupSetting.value : null;
   const lastAccSetting = settings.find(s=>s.key==='lastAccountId');
@@ -2089,7 +2092,8 @@ function mergedLedger(){
   return [...txItems, ...trItems].sort((a,b)=> b.date.localeCompare(a.date) || (b.id-a.id));
 }
 
-function ledgerRowEl(item){
+function itemKey(it){ return (it.itemType==='transfer' ? 'tr:' : 'tx:') + it.id; }
+function ledgerRowEl(item, selectable){
   const wrap = document.createElement('div');
   wrap.className = 'ledger-row-wrap';
   const row = document.createElement('div');
@@ -2116,6 +2120,14 @@ function ledgerRowEl(item){
     `;
   }
   wrap.appendChild(row);
+  if(selectable && state.selMode){
+    const key = itemKey(item);
+    wrap.dataset.sel = key;
+    wrap.classList.add('sel-on');
+    if(state.sel.has(key)) wrap.classList.add('selected');
+    const box = document.createElement('span'); box.className = 'sel-box'; box.textContent = '✓';
+    wrap.appendChild(box);
+  }
   return wrap;
 }
 
@@ -2136,6 +2148,7 @@ function setupLedgerSwipe(){
     const wrap = e.target.closest('.ledger-row-wrap');
     document.querySelectorAll('.ledger-row-wrap.swiped').forEach(w=>{ if(w!==wrap) closeLedgerSwipe(w); });
     if(!wrap) return;
+    if(state.selMode && wrap.dataset.sel) return;
     ledgerSwipe = {wrap, startX:e.clientX, startY:e.clientY, dx:0, dragging:false, wasSwiped: wrap.classList.contains('swiped')};
   });
   document.addEventListener('pointermove', (e)=>{
@@ -2242,7 +2255,7 @@ function setupCycleShift(){
   });
 }
 setupCycleShift();
-function renderLedgerList(container, items){
+function renderLedgerList(container, items, selectable){
   container.innerHTML = '';
   let lastDate = null;
   items.forEach(it=>{
@@ -2253,7 +2266,45 @@ function renderLedgerList(container, items){
       container.appendChild(header);
       lastDate = it.date;
     }
-    container.appendChild(ledgerRowEl(it));
+    container.appendChild(ledgerRowEl(it, selectable));
+  });
+}
+/* Agrupado por categoría: cada grupo se puede plegar; dentro, los movimientos siguen ordenados por fecha */
+function itemBase(it){
+  if(it.itemType==='transfer'){ const a = getAccount(it.fromAccountId); return toBase(it.fromAmount, a?a.currency:state.baseCurrency); }
+  const a = getAccount(it.accountId); return toBase(it.amount, a?a.currency:state.baseCurrency);
+}
+function renderLedgerGrouped(container, items, selectable){
+  container.innerHTML = '';
+  const groups = new Map();
+  items.forEach(it=>{
+    const isTr = it.itemType==='transfer';
+    const key = isTr ? 'transfer' : 'c'+it.categoryId;
+    let g = groups.get(key);
+    if(!g){
+      const cat = isTr ? null : getCategory(it.categoryId);
+      g = {key, label: isTr ? '↔ Transferencias' : (cat ? catIcon(cat)+' '+escapeHtml(cat.name) : 'Sin categoría'), items:[], net:0};
+      groups.set(key, g);
+    }
+    g.items.push(it);
+    if(!isTr) g.net += it.kind==='income' ? itemBase(it) : -itemBase(it);
+  });
+  [...groups.values()].sort((a,b)=> Math.abs(b.net)-Math.abs(a.net) || b.items.length-a.items.length).forEach(g=>{
+    const collapsed = state.collapsedCats.has(g.key);
+    const head = document.createElement('div');
+    head.className = 'cat-group-head';
+    head.dataset.catGroup = g.key;
+    head.innerHTML = `<span>${collapsed?'▸':'▾'} ${g.label} <span class="muted">· ${g.items.length}</span></span><span class="cat-group-amt${g.key==='transfer'?'':(g.net<0?' neg':' pos')}">${g.key==='transfer'?'':fmtMoney(g.net)}</span>`;
+    container.appendChild(head);
+    if(collapsed) return;
+    let lastDate = null;
+    g.items.forEach(it=>{
+      if(it.date !== lastDate){
+        const dh = document.createElement('div'); dh.className = 'ledger-date-header'; dh.textContent = fmtDateHeader(it.date);
+        container.appendChild(dh); lastDate = it.date;
+      }
+      container.appendChild(ledgerRowEl(it, selectable));
+    });
   });
 }
 
@@ -2270,6 +2321,7 @@ function renderMovimientos(){
   document.getElementById('filter-category').innerHTML = '<option value="all">Todas las categorías</option>' + allCats;
 
   renderPeriodBar('mov-period', 'movPeriod', renderMovimientos);
+  renderMovQuick();
   filterAndRenderTx();
   updateSplitHint('tx');
 }
@@ -2346,14 +2398,161 @@ function filterAndRenderTx(){
     });
   }
 
+  const minV = parseFloat(document.getElementById('filter-min').value);
+  const maxV = parseFloat(document.getElementById('filter-max').value);
+  if(!isNaN(minV)) list = list.filter(it => itemBase(it) >= minV - 0.005);
+  if(!isNaN(maxV)) list = list.filter(it => itemBase(it) <= maxV + 0.005);
+
   const listEl = document.getElementById('tx-list');
+  listEl.classList.toggle('sel-mode', state.selMode);
   if(list.length===0){
     listEl.innerHTML = '<div class="empty-note">No hay movimientos que coincidan con estos filtros.</div>';
+  } else if(state.movGroup==='category'){
+    renderLedgerGrouped(listEl, list, true);
   } else {
-    renderLedgerList(listEl, list);
+    renderLedgerList(listEl, list, true);
   }
+  state.visibleKeys = list.map(itemKey);
+  // la selección solo conserva lo que sigue visible
+  [...state.sel].forEach(k=>{ if(!state.visibleKeys.includes(k)) state.sel.delete(k); });
 
+  const sumEl = document.getElementById('mov-summary');
+  if(sumEl){
+    let inc = 0, exp = 0;
+    list.forEach(it=>{ if(it.itemType==='transfer') return; if(it.kind==='income') inc += itemBase(it); else exp += itemBase(it); });
+    sumEl.innerHTML = list.length ? `${list.length} movimiento${list.length===1?'':'s'} · Ingresos <strong class="pos">${fmtMoney(inc)}</strong> · Gastos <strong class="neg">${fmtMoney(exp)}</strong> · Neto <strong>${fmtMoney(inc-exp)}</strong>` : '';
+  }
+  renderSelBar();
   renderSearchExtras(searchVal);
+}
+
+/* ===== Atajos de periodo (siempre con "Mes actual" junto a "30 días") ===== */
+const MOV_QUICK = [{key:'month', label:'Mes actual'}, {key:'30', label:'30 días'}, {key:'90', label:'90 días'}, {key:'year', label:'Este año'}, {key:'all', label:'Todo'}];
+function movQuickPeriod(key){
+  const t = todayISO();
+  if(key==='month') return {mode:'month', ref:t};
+  if(key==='year') return {mode:'year', ref:t};
+  if(key==='30' || key==='90'){
+    const d = new Date(t+'T00:00:00'); d.setDate(d.getDate() - (Number(key)-1));
+    return {mode:'range', start:toISO(d), end:t};
+  }
+  return {mode:'range', start:firstActivityDate(), end:t};
+}
+function renderMovQuick(){
+  const el = document.getElementById('mov-quick'); if(!el) return;
+  const cur = periodRange(state.movPeriod);
+  el.innerHTML = MOV_QUICK.map(o=>{
+    const r = periodRange(movQuickPeriod(o.key));
+    const active = r.start===cur.start && r.end===cur.end;
+    return `<button type="button" class="date-chip${active?' active':''}" data-mov-quick="${o.key}">${o.label}</button>`;
+  }).join('');
+}
+
+/* ===== Selección múltiple: cambiar categoría o cuenta, o eliminar varios a la vez ===== */
+function selectedItems(){
+  const txs = [], trs = [];
+  state.sel.forEach(k=>{
+    const [kind, id] = k.split(':');
+    if(kind==='tx'){ const t = state.transactions.find(x=>x.id===Number(id)); if(t) txs.push(t); }
+    else { const t = state.transfers.find(x=>x.id===Number(id)); if(t) trs.push(t); }
+  });
+  return {txs, trs};
+}
+function renderSelBar(){
+  const bar = document.getElementById('sel-bar'); if(!bar) return;
+  const btn = document.getElementById('sel-toggle');
+  if(btn){ btn.textContent = state.selMode ? 'Terminar selección' : 'Seleccionar'; btn.classList.toggle('active', state.selMode); }
+  bar.style.display = state.selMode ? '' : 'none';
+  if(!state.selMode) return;
+  const {txs, trs} = selectedItems();
+  const n = txs.length + trs.length;
+  document.getElementById('sel-count').textContent = n ? `${n} seleccionado${n===1?'':'s'}` : 'Toca los movimientos para seleccionarlos';
+  const kinds = [...new Set(txs.map(t=>t.kind))];
+  const catSel = document.getElementById('sel-cat'), accSel = document.getElementById('sel-acc');
+  if(txs.length===0){
+    catSel.innerHTML = '<option value="">Cambiar categoría…</option>'; catSel.disabled = true;
+  } else if(kinds.length>1){
+    catSel.innerHTML = '<option value="">Elige solo gastos o solo ingresos</option>'; catSel.disabled = true;
+  } else {
+    catSel.disabled = false;
+    catSel.innerHTML = '<option value="">Cambiar categoría…</option>' + sortedCategories(kinds[0]).map(c=>`<option value="${c.id}">${catIcon(c)} ${escapeHtml(c.name)}</option>`).join('');
+  }
+  accSel.disabled = txs.length===0;
+  accSel.innerHTML = '<option value="">Mover a cuenta…</option>' + sortedAccounts().map(a=>`<option value="${a.id}">${escapeHtml(a.name)}</option>`).join('');
+  document.getElementById('sel-del').disabled = n===0;
+}
+async function applyBatchTxUpdate(newTxs, olds, message){
+  for(const t of newTxs) await idb.put('transactions', t);
+  state.sel.clear();
+  await loadAll(); renderAll();
+  toast(message, 'Deshacer', async ()=>{
+    for(const o of olds) await idb.put('transactions', o);
+    await loadAll(); renderAll();
+    toast('Cambios deshechos');
+  }, 7000);
+}
+function setupSelection(){
+  ['filter-min','filter-max'].forEach(id=> document.getElementById(id).addEventListener('input', filterAndRenderTx));
+  document.getElementById('filter-group').addEventListener('change', (e)=>{ state.movGroup = e.target.value; filterAndRenderTx(); });
+  document.getElementById('sel-toggle').addEventListener('click', ()=>{
+    state.selMode = !state.selMode; state.sel.clear(); filterAndRenderTx();
+  });
+  document.getElementById('sel-all').addEventListener('click', ()=>{
+    const all = state.visibleKeys || [];
+    if(state.sel.size === all.length) state.sel.clear(); else all.forEach(k=>state.sel.add(k));
+    filterAndRenderTx();
+  });
+  document.addEventListener('click', async (e)=>{
+    const q = e.target.closest('[data-mov-quick]');
+    if(q){ state.movPeriod = movQuickPeriod(q.dataset.movQuick); renderMovimientos(); return; }
+    const g = e.target.closest('[data-cat-group]');
+    if(g){
+      const k = g.dataset.catGroup;
+      if(state.collapsedCats.has(k)) state.collapsedCats.delete(k); else state.collapsedCats.add(k);
+      filterAndRenderTx(); return;
+    }
+    const w = e.target.closest('[data-sel]');
+    if(w && state.selMode){
+      const k = w.dataset.sel;
+      if(state.sel.has(k)) state.sel.delete(k); else state.sel.add(k);
+      w.classList.toggle('selected', state.sel.has(k));
+      renderSelBar();
+    }
+  });
+  document.getElementById('sel-cat').addEventListener('change', async (e)=>{
+    const catId = Number(e.target.value); if(!catId) return;
+    const {txs} = selectedItems(); const cat = getCategory(catId);
+    if(!txs.length || !cat) return;
+    if(!confirm(`¿Cambiar la categoría de ${txs.length} movimiento${txs.length===1?'':'s'} a "${cat.name}"? (la subcategoría se quita)`)){ renderSelBar(); return; }
+    await applyBatchTxUpdate(txs.map(t=>({...t, categoryId:catId, subcategory:''})), txs.map(t=>({...t})), `${txs.length} movimiento${txs.length===1?'':'s'} pasaron a ${cat.name}`);
+  });
+  document.getElementById('sel-acc').addEventListener('change', async (e)=>{
+    const accId = Number(e.target.value); if(!accId) return;
+    const {txs} = selectedItems(); const acc = getAccount(accId);
+    const movable = txs.filter(t=>t.source!=='installment' && t.accountId!==accId);
+    const skipped = txs.length - movable.length;
+    if(!movable.length){ toast('Nada que mover: ya están en esa cuenta o son cuotas de una compra a plazos'); renderSelBar(); return; }
+    const mixed = movable.some(t=>{ const a=getAccount(t.accountId); return a && a.currency!==acc.currency; });
+    if(!confirm(`¿Mover ${movable.length} movimiento${movable.length===1?'':'s'} a "${acc.name}"?` + (mixed ? '\n\nOjo: alguna cuenta tiene otra moneda; el importe no se convierte.' : '') + (skipped ? `\n\n${skipped} se dejan donde están (cuotas o ya en esa cuenta).` : ''))){ renderSelBar(); return; }
+    await applyBatchTxUpdate(movable.map(t=>({...t, accountId:accId})), movable.map(t=>({...t})), `${movable.length} movimiento${movable.length===1?'':'s'} movidos a ${acc.name}`);
+  });
+  document.getElementById('sel-del').addEventListener('click', ()=>{
+    const {txs, trs} = selectedItems(); const n = txs.length + trs.length;
+    if(!n) return;
+    const txIds = new Set(txs.map(t=>t.id)), trIds = new Set(trs.map(t=>t.id));
+    state.transactions = state.transactions.filter(t=>!txIds.has(t.id));
+    state.transfers = state.transfers.filter(t=>!trIds.has(t.id));
+    state.sel.clear();
+    renderAll();
+    scheduleDelete(`${n} movimiento${n===1?'':'s'} eliminado${n===1?'':'s'}`,
+      async ()=>{
+        for(const t of txs){ await idb.delete('transactions', t.id); if(t.debtId) await revertDebtEffect(t.debtId, t.debtEffect, t.amount); }
+        for(const t of trs) await idb.delete('transfers', t.id);
+        await loadAll(); renderAll();
+      },
+      async ()=>{ await loadAll(); renderAll(); }
+    );
+  });
 }
 
 function renderSearchExtras(searchVal){
@@ -2578,7 +2777,226 @@ function renderCategoriesEditor(containerId, kind){
 
 /* ================= Rendering: Ajustes ================= */
 /* ================= Rendering: Más (metas, recurrentes, recordatorios, deudas) ================= */
+/* ================= Informe: tendencias por periodo y categoría ================= */
+const REPORT_OPTIONS = [{key:'month',label:'Mes actual'},{key:'30',label:'30 días'},{key:'90',label:'90 días'},{key:'12m',label:'12 meses'},{key:'year',label:'Este año'},{key:'lastyear',label:'Año pasado'},{key:'all',label:'Todo'}];
+function addDaysISO(iso, n){ const d = new Date(iso+'T00:00:00'); d.setDate(d.getDate()+n); return toISO(d); }
+function mondayOfISO(iso){ const d = new Date(iso+'T00:00:00'); d.setDate(d.getDate() - ((d.getDay()+6)%7)); return toISO(d); }
+function getReportKey(){
+  let k = 'year';
+  try{ k = localStorage.getItem('libro_report_key') || 'year'; }catch(e){}
+  return REPORT_OPTIONS.some(o=>o.key===k) ? k : 'year';
+}
+function reportRange(key){
+  const t = todayISO(), T = new Date(t+'T00:00:00'), y = T.getFullYear(), m = T.getMonth();
+  if(key==='month'){
+    const prevLast = new Date(y, m, 0).getDate();
+    return {start:toISO(new Date(y,m,1)), end:t, prevStart:toISO(new Date(y,m-1,1)), prevEnd:toISO(new Date(y,m-1,Math.min(T.getDate(),prevLast))), gran:'day', phrase:'el mes anterior'};
+  }
+  if(key==='30' || key==='90'){
+    const n = Number(key), s = addDaysISO(t, -(n-1));
+    return {start:s, end:t, prevStart:addDaysISO(s,-n), prevEnd:addDaysISO(s,-1), gran: key==='30' ? 'day' : 'week', phrase:`los ${n} días anteriores`};
+  }
+  if(key==='12m'){
+    const s = toISO(new Date(y,m-11,1));
+    return {start:s, end:t, prevStart:toISO(new Date(y,m-23,1)), prevEnd:addDaysISO(s,-1), gran:'month', phrase:'los 12 meses anteriores'};
+  }
+  if(key==='year') return {start:toISO(new Date(y,0,1)), end:t, prevStart:toISO(new Date(y-1,0,1)), prevEnd:toISO(new Date(y-1,m,T.getDate())), gran:'month', phrase:'el mismo periodo del año pasado'};
+  if(key==='lastyear') return {start:toISO(new Date(y-1,0,1)), end:toISO(new Date(y-1,11,31)), prevStart:toISO(new Date(y-2,0,1)), prevEnd:toISO(new Date(y-2,11,31)), gran:'month', phrase:'el año anterior'};
+  const s = firstActivityDate(), span = Math.round((T-new Date(s+'T00:00:00'))/86400000)+1;
+  return {start:s, end:t, prevStart:null, prevEnd:null, gran: span>200 ? 'month' : (span>45 ? 'week' : 'day'), phrase:''};
+}
+function reportBucketOf(gran, date){ return gran==='day' ? date : (gran==='week' ? mondayOfISO(date) : date.slice(0,7)); }
+function reportBuckets(r){
+  const out = [], idx = new Map();
+  const add = (id,label)=>{ idx.set(id, out.length); out.push({id,label,v:0}); };
+  if(r.gran==='day'){
+    for(let d=r.start; d<=r.end; d=addDaysISO(d,1)) add(d, String(Number(d.slice(8,10))));
+  } else if(r.gran==='week'){
+    for(let d=mondayOfISO(r.start); d<=r.end; d=addDaysISO(d,7)) add(d, new Date(d+'T00:00:00').toLocaleDateString('es-ES',{day:'numeric',month:'short'}));
+  } else {
+    const c = new Date(r.start.slice(0,7)+'-01T00:00:00');
+    while(toISO(c) <= r.end){
+      add(toISO(c).slice(0,7), cap(c.toLocaleDateString('es-ES',{month:'short'})) + (r.gran==='month' && (c.getMonth()===0 || out.length===0) ? ' '+String(c.getFullYear()).slice(2) : ''));
+      c.setMonth(c.getMonth()+1);
+    }
+  }
+  return {list:out, idx};
+}
+function pctChange(a, b){ return b>0.004 ? (a-b)/b*100 : null; }
+function computeReport(key, type, catId){
+  const r = reportRange(key);
+  const sums = (from, to)=>{
+    const o = {inc:0, exp:0, byCat:{}};
+    state.transactions.forEach(t=>{
+      if(t.date<from || t.date>to) return;
+      if(t.kind!=='income' && t.kind!=='expense') return;
+      const v = sumBase([t]);
+      if(t.kind==='income') o.inc += v; else o.exp += v;
+      if(t.kind===type) o.byCat[t.categoryId] = (o.byCat[t.categoryId]||0) + v;
+    });
+    return o;
+  };
+  const cur = sums(r.start, r.end);
+  const prev = r.prevStart ? sums(r.prevStart, r.prevEnd) : null;
+  const B = reportBuckets(r);
+  const catSeries = {};
+  state.transactions.forEach(t=>{
+    if(t.date<r.start || t.date>r.end || t.kind!==type) return;
+    const i = B.idx.get(reportBucketOf(r.gran, t.date)); if(i==null) return;
+    const v = sumBase([t]);
+    if(!catSeries[t.categoryId]) catSeries[t.categoryId] = B.list.map(()=>0);
+    catSeries[t.categoryId][i] += v;
+    if(!catId || t.categoryId===catId) B.list[i].v += v;
+  });
+  return {r, cur, prev, buckets:B.list, catSeries, key, type, catId};
+}
+let reportModel = null;
+function reportUnit(gran){ return gran==='day' ? 'día' : (gran==='week' ? 'semana' : 'mes'); }
+function deltaHtml(a, b, lowerIsGood, phrase){
+  const pc = pctChange(a, b);
+  if(pc===null) return '';
+  const bad = lowerIsGood ? pc>0 : pc<0;
+  return `<span style="color:${Math.abs(pc)<0.5?'var(--text-faint)':(bad?'var(--over)':'var(--teal)')};">${pc>=0?'▲':'▼'} ${Math.abs(pc).toFixed(0)}%</span> <span class="muted">vs ${phrase}</span>`;
+}
+function renderReport(){
+  const card = document.getElementById('report-card'); if(!card) return;
+  const key = getReportKey();
+  const type = state.rpType || 'expense';
+  if(state.rpCat && !getCategory(state.rpCat)) state.rpCat = null;
+  const m = computeReport(key, type, state.rpCat);
+  reportModel = m; state.rpSel = null;
+  const {r, cur, prev, buckets} = m;
+  document.getElementById('rp-chips').innerHTML = REPORT_OPTIONS.map(o=>`<button type="button" class="date-chip${o.key===key?' active':''}" data-rp-key="${o.key}">${o.label}</button>`).join('');
+  document.getElementById('rp-type').innerHTML = [['expense','Gastos'],['income','Ingresos']].map(([k,l])=>`<button type="button" class="date-chip${k===type?' active':''}" data-rp-type="${k}">${l}</button>`).join('')
+    + (state.rpCat ? `<button type="button" class="date-chip active" data-rp-cat-clear="1">${catIcon(getCategory(state.rpCat))} ${escapeHtml(getCategory(state.rpCat).name)} ✕</button>` : '');
+  const net = cur.inc - cur.exp, pnet = prev ? prev.inc - prev.exp : null;
+  const phrase = r.phrase;
+  document.getElementById('rp-totals').innerHTML = `
+    <div><div class="stat-label">Ingresos</div><div class="stat-num income">${fmtMoney(cur.inc)}</div><div class="stat-sub">${prev ? deltaHtml(cur.inc, prev.inc, false, phrase) : ''}</div></div>
+    <div><div class="stat-label">Gastos</div><div class="stat-num expense">${fmtMoney(cur.exp)}</div><div class="stat-sub">${prev ? deltaHtml(cur.exp, prev.exp, true, phrase) : ''}</div></div>
+    <div><div class="stat-label">Balance</div><div class="stat-num">${fmtMoney(net)}</div><div class="stat-sub">${cur.inc>0 ? 'Ahorras el '+Math.round(net/cur.inc*100)+' % de tus ingresos' : ''}</div></div>`;
+  const total = buckets.reduce((a,b)=>a+b.v,0);
+  const unit = reportUnit(r.gran);
+  const nonEmpty = buckets.filter(b=>b.v>0);
+  const avg = buckets.length ? total/buckets.length : 0;
+  const maxB = buckets.reduce((a,b)=> b.v>a.v ? b : a, {v:0});
+  const catName = state.rpCat ? getCategory(state.rpCat).name : (type==='expense' ? 'Gastos' : 'Ingresos');
+  document.getElementById('rp-sub').innerHTML = nonEmpty.length
+    ? `<strong>${escapeHtml(catName)}</strong>: promedio ${fmtMoney(avg)} por ${unit} · el más alto: ${escapeHtml(maxB.label)} (${fmtMoney(maxB.v)})`
+    : `Sin ${type==='expense'?'gastos':'ingresos'} en este periodo.`;
+  reportChartHead();
+  renderReportChart();
+  // tendencia: 2ª mitad frente a 1ª
+  const trEl = document.getElementById('rp-trend');
+  if(buckets.length>=4 && total>0){
+    const h = Math.floor(buckets.length/2);
+    const a1 = buckets.slice(0,h).reduce((a,b)=>a+b.v,0)/h, a2 = buckets.slice(h).reduce((a,b)=>a+b.v,0)/(buckets.length-h);
+    const pc = pctChange(a2, a1);
+    if(pc===null) trEl.innerHTML = '';
+    else {
+      const bad = type==='expense' ? pc>0 : pc<0;
+      const flat = Math.abs(pc)<5;
+      trEl.innerHTML = `Tendencia: <span style="color:${flat?'var(--text-soft)':(bad?'var(--over)':'var(--teal)')}; font-weight:600;">${flat?'estable':(pc>0?'▲ subiendo':'▼ bajando')} (${pc>=0?'+':'−'}${Math.abs(pc).toFixed(0)} %)</span> <span class="muted">la 2ª mitad del periodo frente a la 1ª, por ${unit}</span>`;
+    }
+  } else trEl.innerHTML = '';
+  // categorías
+  const rows = Object.keys(cur.byCat).map(id=>({id:Number(id), total:cur.byCat[id], prevTotal: prev ? (prev.byCat[id]||0) : null, series:m.catSeries[id]||[]})).filter(x=>x.total>0.004).sort((a,b)=>b.total-a.total);
+  const sumCats = rows.reduce((a,b)=>a+b.total,0) || 1;
+  const col = type==='expense' ? 'var(--over)' : 'var(--teal)';
+  const spark = (arr)=>{
+    const mx = Math.max(...arr, 0.0001), n = arr.length;
+    if(n<2) return '';
+    const pts = arr.map((v,i)=> (i/(n-1)*54+1).toFixed(1)+','+(15-(v/mx)*13).toFixed(1)).join(' ');
+    return `<svg class="rp-spark" viewBox="0 0 56 16" preserveAspectRatio="none"><polyline points="${pts}" fill="none" stroke="${col}" stroke-width="1.4" stroke-linejoin="round"/></svg>`;
+  };
+  document.getElementById('rp-cats').innerHTML = rows.length ? rows.map(x=>{
+    const c = getCategory(x.id);
+    const share = x.total/sumCats*100;
+    return `<div class="rp-cat${state.rpCat===x.id?' sel':''}" data-rp-cat="${x.id}">
+      <div class="rp-cat-top"><div class="rp-cat-name">${c ? catIcon(c)+' '+escapeHtml(c.name) : 'Sin categoría'}</div>${spark(x.series)}<div class="rp-cat-amt">${fmtMoney(x.total)}</div></div>
+      <div class="budget-track"><div class="budget-fill" style="width:${share.toFixed(1)}%; background:${col};"></div></div>
+      <div class="stat-sub">${share.toFixed(0)} % del total${x.prevTotal!==null ? ' · '+(deltaHtml(x.total, x.prevTotal, type==='expense', phrase) || '<span class="muted">sin datos antes</span>') : ''}</div>
+    </div>`;
+  }).join('') : '<div class="empty-note">Nada que mostrar en este periodo.</div>';
+}
+function reportChartHead(idx){
+  const m = reportModel; if(!m) return;
+  const el = document.getElementById('rp-head');
+  const total = m.buckets.reduce((a,b)=>a+b.v,0);
+  if(idx!=null && m.buckets[idx]){
+    el.innerHTML = `<span class="trend-hover">${fmtMoney(m.buckets[idx].v)}</span> <span class="trend-period">${escapeHtml(m.buckets[idx].label)}</span>`;
+  } else {
+    const per = REPORT_OPTIONS.find(o=>o.key===m.key).label.toLowerCase();
+    el.innerHTML = `<span class="${m.type==='expense'?'down':'up'}">${fmtMoney(total)}</span> <span class="trend-period">en ${per}</span>`;
+  }
+}
+function renderReportChart(){
+  const svg = document.getElementById('rp-chart'); const m = reportModel;
+  if(!svg || !m) return;
+  const W = Math.max(220, Math.round(svg.getBoundingClientRect().width) || 320), H = 150, padL = 4, padB = 18, padT = 8;
+  const n = m.buckets.length, max = Math.max(...m.buckets.map(b=>b.v), 0.0001);
+  const slot = (W-padL*2)/Math.max(1,n), bw = Math.max(2, Math.min(28, slot*0.7));
+  const col = m.type==='expense' ? 'var(--over)' : 'var(--teal)';
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  const yOf = v => H-padB - (v/max)*(H-padB-padT);
+  const total = m.buckets.reduce((a,b)=>a+b.v,0), avg = n ? total/n : 0;
+  const every = Math.max(1, Math.ceil(n/ Math.floor((W-8)/34)));
+  let html = '';
+  m.buckets.forEach((b,i)=>{
+    const x = padL + i*slot + (slot-bw)/2, y = yOf(b.v), h = Math.max(b.v>0?1.5:0, H-padB-y);
+    html += `<rect class="rp-hit" data-rb="${i}" x="${(padL+i*slot).toFixed(1)}" y="0" width="${slot.toFixed(1)}" height="${H-padB}" fill="transparent"/>`;
+    html += `<rect class="rp-bar" data-rbar="${i}" x="${x.toFixed(1)}" y="${(H-padB-h).toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="2" fill="${col}" opacity="0.85"/>`;
+    if(i%every===0 || i===n-1) html += `<text x="${(x+bw/2).toFixed(1)}" y="${H-4}" text-anchor="middle" class="rp-lbl">${escapeHtml(b.label)}</text>`;
+  });
+  if(avg>0) html += `<line x1="${padL}" x2="${W-padL}" y1="${yOf(avg).toFixed(1)}" y2="${yOf(avg).toFixed(1)}" stroke="var(--text-faint)" stroke-width="1" stroke-dasharray="4 3"/>`;
+  svg.innerHTML = html;
+}
+function setupReport(){
+  document.addEventListener('click', (e)=>{
+    const k = e.target.closest('[data-rp-key]');
+    if(k){ try{ localStorage.setItem('libro_report_key', k.dataset.rpKey); }catch(err){} renderReport(); return; }
+    const t = e.target.closest('[data-rp-type]');
+    if(t){ state.rpType = t.dataset.rpType; state.rpCat = null; renderReport(); return; }
+    if(e.target.closest('[data-rp-cat-clear]')){ state.rpCat = null; renderReport(); return; }
+    const c = e.target.closest('[data-rp-cat]');
+    if(c){ const id = Number(c.dataset.rpCat); state.rpCat = state.rpCat===id ? null : id; renderReport(); return; }
+    const b = e.target.closest('[data-rb]');
+    if(b && b.closest('#rp-chart')){
+      const i = Number(b.dataset.rb);
+      state.rpSel = state.rpSel===i ? null : i;
+      document.querySelectorAll('#rp-chart .rp-bar').forEach(r=> r.setAttribute('opacity', state.rpSel==null || Number(r.dataset.rbar)===state.rpSel ? '0.85' : '0.3'));
+      reportChartHead(state.rpSel);
+      return;
+    }
+    if(e.target.closest('#rp-print')) printReport();
+  });
+  let rt; window.addEventListener('resize', ()=>{ clearTimeout(rt); rt = setTimeout(renderReportChart, 150); });
+}
+function printReport(){
+  const m = reportModel; if(!m) return;
+  const {r, cur, buckets} = m;
+  const label = REPORT_OPTIONS.find(o=>o.key===m.key).label;
+  const cats = Object.keys(cur.byCat).map(id=>({c:getCategory(Number(id)), v:cur.byCat[id]})).filter(x=>x.v>0.004).sort((a,b)=>b.v-a.v);
+  const sum = cats.reduce((a,b)=>a+b.v,0) || 1;
+  const win = window.open('', '_blank');
+  if(!win){ toast('El navegador bloqueó la ventana del informe'); return; }
+  win.document.write(`<html><head><title>Informe Libro</title><style>
+    body{font-family:Arial,sans-serif; padding:30px; color:#222;} h1{font-size:20px;} h2{font-size:15px; margin-top:26px;} p{color:#666; font-size:13px;}
+    table{width:100%; border-collapse:collapse; margin-top:10px;} th,td{border-bottom:1px solid #ddd; padding:7px; text-align:left; font-size:13px;} th{background:#f4f4f4;} td.r,th.r{text-align:right;}
+  </style></head><body>
+  <h1>Informe — Libro</h1><p>${label}: ${r.start} a ${r.end}</p>
+  <table><tbody><tr><th>Ingresos</th><td class="r">${fmtMoney(cur.inc)}</td></tr><tr><th>Gastos</th><td class="r">${fmtMoney(cur.exp)}</td></tr><tr><th>Balance</th><td class="r">${fmtMoney(cur.inc-cur.exp)}</td></tr></tbody></table>
+  <h2>${m.type==='expense'?'Gastos':'Ingresos'} por categoría</h2>
+  <table><thead><tr><th>Categoría</th><th class="r">Total</th><th class="r">%</th></tr></thead><tbody>${cats.map(x=>`<tr><td>${escapeHtml(x.c?x.c.name:'Sin categoría')}</td><td class="r">${fmtMoney(x.v)}</td><td class="r">${(x.v/sum*100).toFixed(0)} %</td></tr>`).join('') || '<tr><td colspan="3">Sin datos.</td></tr>'}</tbody></table>
+  <h2>Evolución por ${reportUnit(r.gran)}${state.rpCat ? ' — '+escapeHtml(getCategory(state.rpCat).name) : ''}</h2>
+  <table><thead><tr><th>${reportUnit(r.gran)==='mes'?'Mes':(reportUnit(r.gran)==='semana'?'Semana desde':'Día')}</th><th class="r">${m.type==='expense'?'Gastos':'Ingresos'}</th></tr></thead><tbody>${buckets.map(b=>`<tr><td>${escapeHtml(b.label)}</td><td class="r">${fmtMoney(b.v)}</td></tr>`).join('')}</tbody></table>
+  </body></html>`);
+  win.document.close(); win.focus(); win.print();
+}
+setupReport();
+
 function renderMas(){
+  renderReport();
   // Metas de ahorro
   const goalsEl = document.getElementById('goals-list');
   goalsEl.innerHTML = '';
@@ -3720,6 +4138,7 @@ function renderAjustes(){
     <div class="rate-row"><label>1 ${c} = ? ${state.baseCurrency}</label><input type="number" step="0.0001" min="0" data-rate="${c}" value="${effectiveRate(c).toFixed(4)}"></div>
   `).join('');
 
+  refreshAutoBackupUI();
   const backupDesc = document.getElementById('last-backup-desc');
   if(state.lastBackupDate){
     const days = daysSince(state.lastBackupDate);
@@ -4678,35 +5097,7 @@ function setupAjustes(){
     }
   });
 
-  document.getElementById('export-btn').addEventListener('click', async ()=>{
-    const data = await buildBackupData();
-    const filename = 'libro-finanzas-backup-' + todayISO() + '.json';
-    const blob = new Blob([JSON.stringify(data,null,2)], {type:'application/json'});
-    const file = new File([blob], filename, {type:'application/json'});
-
-    let shared = false;
-    if(navigator.canShare && navigator.canShare({files:[file]})){
-      try{
-        await navigator.share({files:[file], title:'Copia de seguridad de Libro'});
-        shared = true;
-      }catch(err){
-        shared = false; // usuario canceló o falló; caemos a la descarga normal
-      }
-    }
-    if(!shared){
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url; a.download = filename; a.click();
-      URL.revokeObjectURL(url);
-    }
-
-    await idb.put('settings', {key:'lastBackupDate', value: todayISO()});
-    state.lastBackupDate = todayISO();
-    dismissBackupReminder();
-    renderAjustes();
-    if(shared) toast('Copia de seguridad compartida');
-    else toast('Copia de seguridad descargada');
-  });
+  document.getElementById('export-btn').addEventListener('click', ()=> exportBackupNow());
 
   document.getElementById('export-csv-btn').addEventListener('click', ()=>{
     const rows = [['Fecha','Tipo','Cuenta','Categoría','Subcategoría','Importe','Moneda','Nota']];
@@ -4780,7 +5171,40 @@ function setupAjustes(){
   });
 
   setupOneDriveSync();
+  setupAutoBackup();
+  setupSelection();
   setupResumenLayoutSettings();
+}
+
+/* Copia de un toque: comparte el JSON (menú de compartir del móvil) o lo descarga */
+async function exportBackupNow(){
+    const data = await buildBackupData();
+    const filename = 'libro-finanzas-backup-' + todayISO() + '.json';
+    const blob = new Blob([JSON.stringify(data,null,2)], {type:'application/json'});
+    const file = new File([blob], filename, {type:'application/json'});
+
+    let shared = false;
+    if(navigator.canShare && navigator.canShare({files:[file]})){
+      try{
+        await navigator.share({files:[file], title:'Copia de seguridad de Libro'});
+        shared = true;
+      }catch(err){
+        shared = false; // usuario canceló o falló; caemos a la descarga normal
+      }
+    }
+    if(!shared){
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename; a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    await idb.put('settings', {key:'lastBackupDate', value: todayISO()});
+    state.lastBackupDate = todayISO();
+    dismissBackupReminder();
+    renderAjustes();
+    if(shared) toast('Copia de seguridad compartida');
+    else toast('Copia de seguridad descargada');
 }
 
 /* ================= Copia de seguridad: datos compartidos entre export/import y sync con OneDrive ================= */
@@ -4799,6 +5223,139 @@ async function restoreFromBackupData(data){
     }
   }
   await loadAll(); renderAll();
+}
+
+/* ================= Respaldo automático a carpeta (Chrome/Edge en laptop) ================= */
+// El navegador no deja escribir en disco sin permiso: se elige la carpeta una vez; al abrir la app (o 30 s
+// después de cambiar datos) se guarda libro-respaldo-AAAA-MM-DD.json y se conservan los últimos 10 días.
+// Si el navegador pide confirmar el permiso en una nueva sesión, aparece un aviso de un toque.
+const AUTO_BACKUP_KEEP = 10;
+const AUTO_BACKUP_RE = /^libro-respaldo-\d{4}-\d{2}-\d{2}\.json$/;
+const autoBackupSupported = ()=> 'showDirectoryPicker' in window;
+let autoBackupTimer = null, autoBackupArmed = false, autoBackupBusy = false;
+function noteDataChanged(store){
+  if(!autoBackupArmed || store==='settings' || store==='fileHandles') return;
+  clearTimeout(autoBackupTimer);
+  autoBackupTimer = setTimeout(()=>{ maybeAutoBackup({force:true}); }, 30000);
+}
+async function getAutoBackupDir(){
+  const rec = (await idb.getAll('fileHandles')).find(r=>r.key==='autoBackupDir');
+  return rec ? rec.handle : null;
+}
+async function getAutoBackupMeta(){
+  return (await idb.getAll('fileHandles')).find(r=>r.key==='autoBackupMeta') || null;
+}
+async function autoBackupPermission(handle, ask){
+  const opts = {mode:'readwrite'};
+  try{
+    if((await handle.queryPermission(opts)) === 'granted') return true;
+    if(ask) return (await handle.requestPermission(opts)) === 'granted';
+  }catch(e){}
+  return false;
+}
+async function writeAutoBackup(dir){
+  const name = 'libro-respaldo-' + todayISO() + '.json';
+  const fh = await dir.getFileHandle(name, {create:true});
+  const w = await fh.createWritable();
+  await w.write(JSON.stringify(await buildBackupData(), null, 2));
+  await w.close();
+  const names = [];
+  for await (const [n] of dir.entries()) if(AUTO_BACKUP_RE.test(n)) names.push(n);
+  names.sort().reverse();
+  for(const n of names.slice(AUTO_BACKUP_KEEP)){ try{ await dir.removeEntry(n); }catch(e){} }
+  const at = new Date().toISOString();
+  await idb.put('fileHandles', {key:'autoBackupMeta', day:todayISO(), at});
+  await idb.put('settings', {key:'lastBackupDate', value: todayISO()});
+  state.lastBackupDate = todayISO();
+  return name;
+}
+/* Devuelve: 'none' | 'empty' | 'done' | 'needs-permission' | 'ok' | 'error' */
+async function maybeAutoBackup(opts){
+  opts = opts || {};
+  if(!autoBackupSupported() || autoBackupBusy) return 'none';
+  const dir = await getAutoBackupDir();
+  if(!dir) return 'none';
+  if(state.transactions.length===0 && state.transfers.length===0) return 'empty';
+  const meta = await getAutoBackupMeta();
+  if(!opts.force && meta && meta.day===todayISO()) return 'done';
+  autoBackupBusy = true;
+  try{
+    if(!(await autoBackupPermission(dir, !!opts.ask))) return 'needs-permission';
+    await writeAutoBackup(dir);
+    document.getElementById('backup-reminder-banner')?.remove();
+    refreshAutoBackupUI();
+    return 'ok';
+  }catch(err){
+    return 'error';
+  }finally{
+    autoBackupBusy = false;
+  }
+}
+async function refreshAutoBackupUI(){
+  const supported = autoBackupSupported();
+  const sel = document.getElementById('backup-reminder-days');
+  if(sel) sel.value = String(state.backupReminderDays);
+  const unsup = document.getElementById('autobackup-unsupported');
+  const ctl = document.getElementById('autobackup-controls');
+  if(unsup) unsup.style.display = supported ? 'none' : '';
+  if(ctl) ctl.style.display = supported ? '' : 'none';
+  if(!supported) return;
+  const dir = await getAutoBackupDir();
+  const st = document.getElementById('autobackup-status');
+  document.getElementById('autobackup-choose-btn').textContent = dir ? 'Cambiar carpeta' : 'Elegir carpeta';
+  document.getElementById('autobackup-now-btn').style.display = dir ? '' : 'none';
+  document.getElementById('autobackup-stop-btn').style.display = dir ? '' : 'none';
+  if(!dir){ st.textContent = 'Sin carpeta elegida. Elige una (mejor dentro de OneDrive, Google Drive o similar) y se respaldará sola.'; return; }
+  const meta = await getAutoBackupMeta();
+  const perm = await autoBackupPermission(dir, false);
+  const last = meta ? new Date(meta.at).toLocaleString('es-ES') : 'todavía ninguno';
+  st.textContent = `Carpeta: ${dir.name} · último respaldo: ${last} · se guardan los últimos ${AUTO_BACKUP_KEEP} días.` + (perm ? '' : ' Falta reactivar el permiso: pulsa "Respaldar ahora".');
+}
+function showBackupBanner(text, btnLabel, onClick){
+  const pageHead = document.querySelector('#view-resumen .page-head');
+  if(!pageHead || document.getElementById('backup-reminder-banner')) return;
+  const banner = document.createElement('div');
+  banner.id = 'backup-reminder-banner';
+  banner.style.cssText = 'background:var(--gold-soft); border:1px solid var(--gold); color:var(--gold); border-radius:10px; padding:14px 16px; margin-bottom:20px; font-size:13.5px; line-height:1.5; display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;';
+  banner.innerHTML = `<span>${text}</span><span style="display:flex; gap:8px; flex-shrink:0;"><button class="btn-secondary btn-sm" id="backup-banner-go">${btnLabel}</button><button class="btn-secondary btn-sm" id="backup-reminder-dismiss">Ahora no</button></span>`;
+  pageHead.after(banner);
+  document.getElementById('backup-banner-go').addEventListener('click', async ()=>{ await onClick(); });
+  document.getElementById('backup-reminder-dismiss').addEventListener('click', dismissBackupReminder);
+}
+function setupAutoBackup(){
+  refreshAutoBackupUI();
+  getAutoBackupDir().then(d=>{ autoBackupArmed = !!d; });
+  document.getElementById('autobackup-choose-btn')?.addEventListener('click', async ()=>{
+    try{
+      const dir = await window.showDirectoryPicker({mode:'readwrite'});
+      if(!(await autoBackupPermission(dir, true))){ toast('Permiso denegado para esa carpeta'); return; }
+      await idb.put('fileHandles', {key:'autoBackupDir', handle:dir});
+      autoBackupArmed = true;
+      const r = await maybeAutoBackup({force:true, ask:true});
+      await refreshAutoBackupUI();
+      toast(r==='ok' ? 'Respaldo automático activado' : 'Carpeta guardada');
+    }catch(err){
+      if(err.name !== 'AbortError') toast('No se pudo elegir la carpeta');
+    }
+  });
+  document.getElementById('autobackup-now-btn')?.addEventListener('click', async ()=>{
+    const r = await maybeAutoBackup({force:true, ask:true});
+    await refreshAutoBackupUI();
+    toast(r==='ok' ? 'Respaldo guardado' : r==='needs-permission' ? 'Permiso denegado' : r==='empty' ? 'Aún no hay datos que respaldar' : 'No se pudo respaldar');
+  });
+  document.getElementById('autobackup-stop-btn')?.addEventListener('click', async ()=>{
+    if(!confirm('¿Dejar de respaldar en esa carpeta? Los archivos ya guardados se quedan allí.')) return;
+    await idb.delete('fileHandles', 'autoBackupDir');
+    autoBackupArmed = false;
+    await refreshAutoBackupUI();
+    toast('Respaldo automático desactivado');
+  });
+  document.getElementById('backup-reminder-days')?.addEventListener('change', async (e)=>{
+    const v = Number(e.target.value);
+    state.backupReminderDays = v;
+    await idb.put('settings', {key:'backupReminderDays', value:v});
+    toast('Te avisaré tras '+v+' días sin copia');
+  });
 }
 
 /* ================= Sincronización con carpeta local (OneDrive, Google Drive, etc.) ================= */
@@ -4906,30 +5463,25 @@ function dismissBackupReminder(){
   if(el) el.remove();
 }
 
-function checkBackupReminder(){
+async function checkBackupReminder(){
   if(state.backupReminderShown) return;
   if(state.transactions.length===0 && state.transfers.length===0) return;
-  const overdue = !state.lastBackupDate || daysSince(state.lastBackupDate) >= 14;
+  const auto = await maybeAutoBackup();
+  if(auto==='needs-permission'){
+    state.backupReminderShown = true;
+    showBackupBanner('El respaldo automático necesita que confirmes el permiso de la carpeta (un toque).', 'Reactivar', async ()=>{
+      const r = await maybeAutoBackup({force:true, ask:true});
+      if(r==='ok'){ toast('Respaldo guardado'); } else toast('No se pudo respaldar');
+    });
+    return;
+  }
+  const limit = state.backupReminderDays || 7;
+  const overdue = !state.lastBackupDate || daysSince(state.lastBackupDate) >= limit;
   if(!overdue) return;
   state.backupReminderShown = true;
-  const pageHead = document.querySelector('#view-resumen .page-head');
-  if(!pageHead || document.getElementById('backup-reminder-banner')) return;
-  const banner = document.createElement('div');
-  banner.id = 'backup-reminder-banner';
-  banner.style.cssText = 'background:var(--gold-soft); border:1px solid var(--gold); color:var(--gold); border-radius:10px; padding:14px 16px; margin-bottom:20px; font-size:13.5px; line-height:1.5; display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;';
-  banner.innerHTML = `
-    <span>${state.lastBackupDate ? 'Han pasado más de 14 días desde tu última copia de seguridad.' : 'Todavía no has hecho una copia de seguridad de tus datos.'} Te recomendamos exportarla.</span>
-    <span style="display:flex; gap:8px; flex-shrink:0;">
-      <button class="btn-secondary btn-sm" id="backup-reminder-export">Exportar ahora</button>
-      <button class="btn-secondary btn-sm" id="backup-reminder-dismiss">Ahora no</button>
-    </span>
-  `;
-  pageHead.after(banner);
-  document.getElementById('backup-reminder-export').addEventListener('click', ()=>{
-    document.querySelectorAll('.nav-btn[data-view="ajustes"]')[0].click();
-    dismissBackupReminder();
-  });
-  document.getElementById('backup-reminder-dismiss').addEventListener('click', dismissBackupReminder);
+  const days = state.lastBackupDate ? daysSince(state.lastBackupDate) : null;
+  showBackupBanner(days===null ? 'Todavía no has hecho una copia de seguridad de tus datos.' : `Llevas ${days} día${days===1?'':'s'} sin copia de seguridad.`,
+    'Copiar ahora', async ()=>{ await exportBackupNow(); });
 }
 
 function showFatalError(err){
