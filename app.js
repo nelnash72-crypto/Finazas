@@ -477,6 +477,60 @@ function cutoffDayFor(a){ return a.cutoffDay || a.paymentDay; }
 function paymentDateForCutoff(cutoffISO, paymentDay){
   return firstCardDueDate(paymentDay, cutoffISO);
 }
+/* ===== Ciclos de tarjeta con ajuste manual =====
+   t.cycleShift: +1 = el movimiento pasó al ciclo siguiente (aunque la fecha caiga en el corte); -1 = cuenta en el ciclo anterior. */
+function cardPrevCutoff(a, cutoffISO){
+  const d = new Date(cutoffISO+'T00:00:00');
+  return localISO(dateForDayInMonth(d.getFullYear(), d.getMonth()-1, cutoffDayFor(a)));
+}
+function cardNaturalCutoff(a, dateISO){
+  const cd = cutoffDayFor(a);
+  const d = new Date(dateISO+'T00:00:00');
+  let cutoff = localISO(dateForDayInMonth(d.getFullYear(), d.getMonth(), cd));
+  if(cutoff < dateISO) cutoff = nextMonthlyOnDay(cutoff, cd);
+  return cutoff;
+}
+function cardTxCutoff(a, t){
+  let c = cardNaturalCutoff(a, t.date);
+  const sh = t.cycleShift || 0;
+  if(sh>0) c = nextMonthlyOnDay(c, cutoffDayFor(a));
+  else if(sh<0) c = cardPrevCutoff(a, c);
+  return c;
+}
+/* Saldo de la tarjeta al corte, respetando los movimientos que el usuario movió de ciclo */
+function cardBalanceAtCutoff(a, cutoffISO){
+  let bal = accountBalanceAsOf(a.id, cutoffISO);
+  if(!cutoffDayFor(a)) return bal;
+  state.transactions.forEach(t=>{
+    if(t.accountId!==a.id || !t.cycleShift) return;
+    const eff = t.kind==='income' ? t.amount : -t.amount;
+    const cyc = cardTxCutoff(a, t);
+    if(t.date <= cutoffISO && cyc > cutoffISO) bal -= eff;       // se movió a un ciclo posterior
+    else if(t.date > cutoffISO && cyc <= cutoffISO) bal += eff;  // se movió a este ciclo o a uno anterior
+  });
+  return bal;
+}
+function cardCycleSummary(a){
+  if(!a || a.type!=='tarjeta_credito' || !a.paymentDay) return null;
+  const today = todayISO(), cd = cutoffDayFor(a);
+  const A = cardNextCycle(a, today);
+  const bal = accountBalance(a.id);
+  if(A.cutoff > today){
+    return {billed:0, billedCutoff:null, billedPay:null, current:Math.max(0,-bal), cutoff:A.cutoff, pay:A.paymentDate};
+  }
+  const atCut = cardBalanceAtCutoff(a, A.cutoff);
+  const nextCut = nextMonthlyOnDay(A.cutoff, cd);
+  return {billed:Math.max(0,-atCut), billedCutoff:A.cutoff, billedPay:A.paymentDate,
+          current:Math.max(0, -(bal-atCut)), cutoff:nextCut, pay:paymentDateForCutoff(nextCut, a.paymentDay)};
+}
+function cardCycleLine(a){
+  const c = cardCycleSummary(a); if(!c) return '';
+  const cur = a.currency;
+  const parts = [];
+  if(c.billedCutoff) parts.push(`✂ Facturado (corte ${fmtDate(c.billedCutoff)}): <strong>${fmtMoney(c.billed, cur)}</strong> · se paga el ${fmtDate(c.billedPay)}`);
+  parts.push(`${c.billedCutoff?'Ciclo nuevo':'Ciclo en curso'} (corte ${fmtDate(c.cutoff)}): <strong>${fmtMoney(c.current, cur)}</strong> · se paga el ${fmtDate(c.pay)}`);
+  return parts.join('<br>');
+}
 function cardNextCycle(a, fromISO){
   const cutoffDay = cutoffDayFor(a);
   let cutoff = a.lastAutopayGenerated
@@ -510,7 +564,7 @@ async function generateDueCardPayments(){
     while(iterations < 36){
       const paymentDate = paymentDateForCutoff(nextCutoff, a.paymentDay);
       if(paymentDate > today) break;
-      const used = Math.max(0, -accountBalanceAsOf(a.id, nextCutoff));
+      const used = Math.max(0, -cardBalanceAtCutoff(a, nextCutoff));
       if(used > 0.004){
         const crossRate = effectiveRate(fromAcc.currency) / effectiveRate(a.currency);
         const fromAmount = Math.round((used / crossRate) * 100) / 100;
@@ -1124,7 +1178,7 @@ function renderPaymentAlerts(){
   state.accounts.forEach(a=>{
     if(a.type!=='tarjeta_credito' || !a.paymentDay) return;
     const {cutoff, paymentDate} = cardNextCycle(a, today);
-    const used = Math.max(0, -accountBalanceAsOf(a.id, cutoff));
+    const used = Math.max(0, -cardBalanceAtCutoff(a, cutoff));
     if(used <= 0.004) return;
     const dueDate = paymentDate;
     const daysUntil = Math.round((new Date(dueDate+"T00:00:00") - new Date(today+"T00:00:00")) / 86400000);
@@ -1203,15 +1257,30 @@ function projectInstallmentOccurrences(it, fromDate, toDate){
   }
   return out;
 }
-function projectCardPaymentOccurrences(a, fromDate, toDate){
+/* Pagos de tarjeta proyectados: lo ya cargado hasta el corte + los cargos futuros (recurrentes y cuotas)
+   que caerán en cada corte. Los cargos individuales de la tarjeta NO se listan aparte (se pagan juntos en la fecha de pago). */
+function projectCardPaymentOccurrences(a, fromDate, toDate, cardCharges){
   const out = [];
   if(a.type!=='tarjeta_credito' || !a.paymentDay) return out;
-  const {cutoff, paymentDate} = cardNextCycle(a, fromDate);
-  const used = Math.max(0, -accountBalanceAsOf(a.id, cutoff));
-  if(used <= 0.004) return out;
-  if(paymentDate >= fromDate && paymentDate <= toDate){
-    const label = '💳 ' + a.name + (a.autopayAccountId ? ' (pago automático)' : ' (pendiente de pagar)');
-    out.push({date:paymentDate, label, amount:used, currency:a.currency, kind:'expense'});
+  const today = todayISO();
+  const cutoffDay = cutoffDayFor(a);
+  let {cutoff, paymentDate} = cardNextCycle(a, today);
+  let prevCutoff = null;
+  const charges = (cardCharges || []).slice().sort((x,y)=> x.date.localeCompare(y.date));
+  for(let k=0; k<14 && paymentDate <= toDate; k++){
+    const lo = prevCutoff ? addDaysISO(prevCutoff, 1) : today;
+    const inCycle = charges.filter(c=> c.date >= (lo > today ? lo : today) && c.date <= cutoff);
+    let amount = inCycle.reduce((sum,c)=> sum + c.amount, 0);   // en la moneda de la tarjeta
+    if(k===0) amount += Math.max(0, -cardBalanceAtCutoff(a, cutoff));   // lo ya cargado y sin pagar
+    if(amount > 0.004 && paymentDate >= fromDate){
+      const label = '💳 ' + a.name + (a.autopayAccountId ? ' (pago automático)' : ' (pendiente de pagar)');
+      const names = inCycle.map(c=> c.label);
+      const detail = names.length ? 'Incluye cargos previstos: ' + names.slice(0,4).join(', ') + (names.length>4 ? ` y ${names.length-4} más` : '') : '';
+      out.push({date:paymentDate, label, amount, currency:a.currency, kind:'expense', detail});
+    }
+    prevCutoff = cutoff;
+    cutoff = nextMonthlyOnDay(cutoff, cutoffDay);
+    paymentDate = paymentDateForCutoff(cutoff, a.paymentDay);
   }
   return out;
 }
@@ -1238,12 +1307,31 @@ function cashflowWindow(range){
   const endD = new Date(today+"T00:00:00"); endD.setDate(endD.getDate()+(Number(range)||30));
   return {from: today, to: toISO(endD)};
 }
+function isPaidByCard(accountId){
+  const a = getAccount(accountId);
+  return !!a && a.type==='tarjeta_credito' && !!a.paymentDay;
+}
 function computeCashflowProjection(range){
   const {from: fromDate, to: toDate} = cashflowWindow(range);
+  const today = todayISO();
+  const projFrom = fromDate < today ? fromDate : today;
   let items = [];
-  state.recurring.forEach(r=> items = items.concat(projectRecurringOccurrences(r, fromDate, toDate)));
-  state.installments.forEach(it=> items = items.concat(projectInstallmentOccurrences(it, fromDate, toDate)));
-  state.accounts.forEach(a=> items = items.concat(projectCardPaymentOccurrences(a, fromDate, toDate)));
+  const cardCharges = {};   // accountId -> cargos futuros a esa tarjeta
+  const addCardCharge = (accId, o)=> (cardCharges[accId] = cardCharges[accId] || []).push(o);
+  state.recurring.forEach(r=>{
+    const occ = projectRecurringOccurrences(r, projFrom, toDate);
+    occ.forEach(o=>{
+      if(!r.isTransfer && o.kind==='expense' && isPaidByCard(r.accountId)) addCardCharge(r.accountId, o);
+      else if(o.date >= fromDate) items.push(o);
+    });
+  });
+  state.installments.forEach(it=>{
+    projectInstallmentOccurrences(it, projFrom, toDate).forEach(o=>{
+      if(isPaidByCard(it.accountId)) addCardCharge(it.accountId, o);
+      else if(o.date >= fromDate) items.push(o);
+    });
+  });
+  state.accounts.forEach(a=> items = items.concat(projectCardPaymentOccurrences(a, fromDate, toDate, cardCharges[a.id])));
   items.sort((x,y)=> x.date.localeCompare(y.date));
   return items;
 }
@@ -1267,7 +1355,7 @@ function renderCashflow(){
   totalEl.textContent = `Comprometido: ${fmtMoney(committedExpense)} · Ingresos esperados: ${fmtMoney(expectedIncome)} · Neto: ${fmtMoney(expectedIncome-committedExpense)}`;
   listEl.innerHTML = items.map(it=>{
     const sign = it.kind==='income' ? '+' : (it.kind==='transfer' ? '' : '−');
-    return `<div class="budget-row"><div class="budget-top"><div class="budget-cat">${escapeHtml(it.label)}</div><div class="ledger-amount ${it.kind}">${sign}${fmtMoney(it.amount, it.currency).replace('-','')}</div></div><div class="stat-sub">${fmtDate(it.date)}</div></div>`;
+    return `<div class="budget-row"><div class="budget-top"><div class="budget-cat">${escapeHtml(it.label)}</div><div class="ledger-amount ${it.kind}">${sign}${fmtMoney(it.amount, it.currency).replace('-','')}</div></div><div class="stat-sub">${fmtDate(it.date)}${it.detail ? ' · '+escapeHtml(it.detail) : ''}</div></div>`;
   }).join('');
 }
 
@@ -1715,6 +1803,10 @@ function buildDetail(req){
     d.list = sorted.slice(0, CAP);
     d.title = escapeHtml(acct.name);
     d.summary = `Saldo actual: <strong style="color:var(--text);">${fmtMoney(accountBalance(id), acct.currency)}</strong> · ${countText(sorted.length)}${sorted.length>CAP ? ' (mostrando los '+CAP+' más recientes)' : ''}`;
+    if(acct.type==='tarjeta_credito' && acct.paymentDay && cutoffDayFor(acct)){
+      d.cardId = id;
+      d.summary += `<div class="card-cycle-line" style="margin-top:8px; line-height:1.55;">${cardCycleLine(acct)}</div>`;
+    }
   }
   else if(req.type==='type'){
     const accts = sortedAccounts().filter(a=>a.type===req.acctType);
@@ -1737,6 +1829,7 @@ function renderDetailModal(){
   const listEl = document.getElementById('detail-list');
   if(d.html !== null && d.html !== undefined) listEl.innerHTML = d.html;
   else if(d.list.length===0) listEl.innerHTML = '<div class="empty-note">Sin movimientos en este grupo.</div>';
+  else if(d.cardId) renderCardCycleList(listEl, d.list, getAccount(d.cardId));
   else renderLedgerList(listEl, d.list);
   document.getElementById('detail-actions').innerHTML = d.actions;
 }
@@ -1927,6 +2020,70 @@ function setupLedgerSwipe(){
 
 // Agrupa una lista de movimientos (ya ordenada) bajo encabezados de fecha, ej. "1 de agosto de 2026 (sáb)",
 // en vez de repetir la fecha en cada fila — pensado para ahorrar espacio horizontal en el celular.
+/* Lista de una tarjeta agrupada por ciclo, con separador de corte y ajuste manual de ciclo por movimiento */
+function renderCardCycleList(container, items, acct){
+  container.innerHTML = '';
+  const today = todayISO();
+  const cutOf = it => it.itemType==='tx' ? cardTxCutoff(acct, it) : cardNaturalCutoff(acct, it.date);
+  const groups = [];
+  items.forEach(it=>{
+    const c = cutOf(it);
+    let g = groups[groups.length-1];
+    if(!g || g.cutoff!==c){ g = {cutoff:c, items:[]}; groups.push(g); }
+    g.items.push(it);
+  });
+  groups.sort((x,y)=> y.cutoff.localeCompare(x.cutoff));
+  groups.forEach(g=>{
+    const pay = paymentDateForCutoff(g.cutoff, acct.paymentDay);
+    const net = g.items.reduce((s,it)=> it.itemType==='tx' ? s + (it.kind==='income' ? it.amount : -it.amount) : s, 0);
+    const closed = g.cutoff <= today;
+    const head = document.createElement('div');
+    head.className = 'cycle-sep' + (closed ? ' closed' : ' open');
+    head.innerHTML = `<span>${closed ? '✂ Corte del '+fmtDate(g.cutoff) : '● En curso · corte el '+fmtDate(g.cutoff)} · pago ${fmtDate(pay)}</span><span class="cycle-sep-amt">${fmtMoney(net, acct.currency)}</span>`;
+    container.appendChild(head);
+    let lastDate = null;
+    g.items.forEach(it=>{
+      if(it.date !== lastDate){
+        const dh = document.createElement('div'); dh.className = 'ledger-date-header'; dh.textContent = fmtDateHeader(it.date);
+        container.appendChild(dh); lastDate = it.date;
+      }
+      container.appendChild(ledgerRowEl(it));
+      if(it.itemType==='tx'){
+        const sh = it.cycleShift || 0;
+        const line = document.createElement('div');
+        line.className = 'cycle-line';
+        line.innerHTML = `<button type="button" class="cycle-pill${sh?' set':''}" data-cycle-menu="${it.id}">${sh>0 ? '📌 Pasó al ciclo siguiente' : (sh<0 ? '📌 Cuenta en el ciclo anterior' : '⇅ Ciclo')}</button>
+          <div class="cycle-menu" id="cycle-menu-${it.id}" style="display:none;">
+            <button type="button" class="date-chip${sh<0?' active':''}" data-cycle-set="-1" data-tx="${it.id}">← Ciclo anterior</button>
+            <button type="button" class="date-chip${sh===0?' active':''}" data-cycle-set="0" data-tx="${it.id}">Automático</button>
+            <button type="button" class="date-chip${sh>0?' active':''}" data-cycle-set="1" data-tx="${it.id}">Ciclo siguiente →</button>
+          </div>`;
+        container.appendChild(line);
+      }
+    });
+  });
+}
+function setupCycleShift(){
+  document.addEventListener('click', async (e)=>{
+    const m = e.target.closest('[data-cycle-menu]');
+    if(m){
+      const menu = document.getElementById('cycle-menu-'+m.dataset.cycleMenu);
+      if(menu) menu.style.display = menu.style.display==='none' ? 'flex' : 'none';
+      return;
+    }
+    const b = e.target.closest('[data-cycle-set]');
+    if(!b) return;
+    e.stopPropagation();
+    const t = state.transactions.find(x=>x.id===Number(b.dataset.tx));
+    if(!t) return;
+    const nt = {...t}; const v = Number(b.dataset.cycleSet);
+    if(v===0) delete nt.cycleShift; else nt.cycleShift = v;
+    await idb.put('transactions', nt);
+    await loadAll(); renderAll(); refreshDetailModal();
+    toast(v>0 ? 'Pasó al ciclo siguiente' : (v<0 ? 'Cuenta en el ciclo anterior' : 'Ciclo automático (por fecha)'));
+  });
+}
+setupCycleShift();
 function renderLedgerList(container, items){
   container.innerHTML = '';
   let lastDate = null;
@@ -2111,6 +2268,7 @@ function renderCuentas(){
           <div class="budget-track" style="margin-top:10px;"><div class="budget-fill ${over?'over':(warn?'warn':'')}" style="width:${pct}%"></div></div>
           <div class="stat-sub" style="margin-top:4px;">Consumido ${fmtMoney(used, a.currency)} de ${fmtMoney(limit, a.currency)} · disponible ${fmtMoney(Math.max(0,limit-used), a.currency)}${pendingInstallments>0.004 ? ` <span class="muted">(incluye ${fmtMoney(pendingInstallments, a.currency)} en cuotas pendientes)</span>` : ''}</div>
         ` : ''}
+        ${isCard && a.paymentDay ? `<div class="stat-sub card-cycle-line" style="margin-top:6px; line-height:1.5;">${cardCycleLine(a)}</div>` : ''}
         ${isCard ? `
           <div class="stat-sub" style="margin-top:4px;">${a.paymentDay ? (cutoffDayFor(a)!==a.paymentDay ? `Corte el día ${cutoffDayFor(a)}, pago el día ${a.paymentDay}` : `Pago el día ${a.paymentDay} de cada mes`) : 'Sin día de pago configurado'}${a.paymentDay ? (a.autopayAccountId ? ' · Débito automático desde '+escapeHtml(getAccount(a.autopayAccountId)?.name||'cuenta eliminada') : ' · Sin débito automático') : ''}</div>
         ` : ''}
