@@ -428,12 +428,31 @@ async function generateDueRecurring(){
 function installmentNextDate(it, fromISO){
   return nextMonthlyOnDay(fromISO, Number((it.startDate || fromISO).slice(8,10)));
 }
+/* Modelo con cuotas iniciales (creado desde Fraccionar): las primeras `initialCount` cuotas caen en startDate
+   y las demás, una al mes, el día `payDay` (la primera, el primer día `payDay` posterior a startDate).
+   Las compras a plazos antiguas no tienen payDay y siguen el cálculo de siempre. */
+function installmentDateAt(it, idx){
+  const k = Math.max(1, Number(it.initialCount)||1);
+  if(idx < k) return it.startDate;
+  const s0 = new Date(it.startDate+'T00:00:00');
+  const y = s0.getFullYear();
+  let m = s0.getMonth();
+  if(dateForDayInMonth(y, m, it.payDay) <= s0) m++;
+  return localISO(dateForDayInMonth(y, m + (idx-k), it.payDay));
+}
+function installmentUpcomingDate(it){
+  if(it.payDay) return installmentDateAt(it, it.paidInstallments);
+  return it.lastGenerated ? installmentNextDate(it, it.lastGenerated) : it.startDate;
+}
+function installmentAfter(it, prevISO, nextIdx){
+  return it.payDay ? installmentDateAt(it, nextIdx) : installmentNextDate(it, prevISO);
+}
 async function generateDueInstallments(){
   const today = todayISO();
   for(const it of state.installments){
     if(it.active===false) continue;
     if(it.paidInstallments >= it.totalInstallments){ it.active=false; await idb.put('installments', it); continue; }
-    let next = it.lastGenerated ? installmentNextDate(it, it.lastGenerated) : it.startDate;
+    let next = installmentUpcomingDate(it);
     let iterations = 0;
     let changed = false;
     while(next && next <= today && it.paidInstallments < it.totalInstallments && iterations < 36){
@@ -444,7 +463,7 @@ async function generateDueInstallments(){
       state.transactions.push(txRecord);
       if(it.debtId) await applyDebtPayment(it.debtId, cuotaAmount);
       it.lastGenerated = next;
-      next = installmentNextDate(it, next);
+      next = installmentAfter(it, next, it.paidInstallments);
       changed = true;
       iterations++;
     }
@@ -871,7 +890,7 @@ function renderResumen(){
     const budgetCats = Object.keys(state.budgets).filter(cid => state.budgets[cid] > 0);
     budgetsEl.innerHTML = '';
     if(budgetCats.length===0){
-      budgetsEl.innerHTML = '<div class="empty-note">Fija límites en la pestaña Presupuestos.</div>';
+      budgetsEl.innerHTML = emptyState('🎯','Sin presupuestos','Fija un límite por categoría y verás aquí cuánto llevas gastado.','Ir a Presupuestos','goto-presupuestos');
     } else {
       budgetCats.slice(0,5).forEach(cid=>{
         const cat = getCategory(Number(cid));
@@ -914,11 +933,17 @@ function renderResumen(){
         const arrow = diffPct > 0 ? '▲' : (diffPct < 0 ? '▼' : '·');
         compareEl.textContent = `${arrow} ${Math.abs(diffPct).toFixed(0)}% en gastos vs mes anterior`;
         compareEl.style.color = diffPct > 0 ? 'var(--over)' : 'var(--teal)';
+        compareEl.dataset.detail = 'cmp';
+        compareEl.style.cursor = 'pointer';
+        compareEl.style.textDecoration = 'underline dotted var(--rule-strong)';
+        compareEl.style.textUnderlineOffset = '4px';
       } else {
         compareEl.textContent = '';
+        delete compareEl.dataset.detail;
       }
     } else {
       compareEl.textContent = '';
+      delete compareEl.dataset.detail;
     }
 
     renderChart('resumen-chart', catSpend, periodTx);
@@ -928,7 +953,7 @@ function renderResumen(){
   if(recentEl){
     const recentItems = mergedLedger().slice(0,6);
     if(recentItems.length===0){
-      recentEl.innerHTML = '<div class="empty-note">Aún no hay movimientos.</div>';
+      recentEl.innerHTML = state.accounts.length===0 ? emptyState('🏦','Empieza creando una cuenta','Una cuenta puede ser efectivo, un banco o una tarjeta. Luego podrás registrar movimientos.','Crear cuenta','goto-cuentas') : emptyState('📝','Aún no hay movimientos','Registra tu primer gasto o ingreso; solo toma unos segundos.','Añadir movimiento','add-tx');
     } else {
       renderLedgerList(recentEl, recentItems);
     }
@@ -970,12 +995,14 @@ const RESUMEN_BLOCK_HTML = {
   patrimonio: `<div class="card">
       <div class="section-title">Patrimonio neto <span class="muted">Incluye cuentas ocultas</span></div>
       <div class="balance-num" id="networth-total" style="font-size:26px; margin-bottom:4px;">€0,00</div>
+      <div class="stat-sub" id="networth-note" style="display:none; margin-bottom:6px;"></div>
       <div class="trend-head" id="nw-head"></div>
       <svg class="balance-trend nw-chart" id="nw-chart" viewBox="0 0 300 130"></svg>
       <div class="trend-info" id="nw-info"></div>
       <div class="date-chip-row trend-chips" id="nw-chips"></div>
       <div class="nw-legend" id="nw-legend"></div>
       <div id="networth-breakdown" style="margin-top:14px;"></div>
+      <div class="split-row" id="nw-extras-row" style="display:none; margin-top:14px;"><div><div class="settings-label" style="font-size:13.5px;">Incluir cuotas y deudas pendientes</div><div class="settings-desc" style="margin-top:2px;">Suma lo que debes y resta lo que aún pagarás</div></div><label class="switch"><input type="checkbox" id="nw-extras-toggle"><span class="switch-slider"></span></label></div>
     </div>`,
   'ingresos-gastos': `<div class="card">
       <div class="section-title">Ingresos y gastos</div>
@@ -1244,7 +1271,7 @@ function projectRecurringOccurrences(r, fromDate, toDate){
 function projectInstallmentOccurrences(it, fromDate, toDate){
   const out = [];
   if(it.active===false) return out;
-  let next = it.lastGenerated ? installmentNextDate(it, it.lastGenerated) : it.startDate;
+  let next = installmentUpcomingDate(it);
   let paid = it.paidInstallments;
   let iterations = 0;
   while(next && next <= toDate && paid < it.totalInstallments && iterations < 60){
@@ -1252,7 +1279,7 @@ function projectInstallmentOccurrences(it, fromDate, toDate){
       out.push({date:next, label:`${it.name} · Cuota ${paid+1}/${it.totalInstallments}`, amount:installmentAmountFor(it, paid), currency: getAccount(it.accountId)?.currency||state.baseCurrency, kind:'expense'});
     }
     paid++;
-    next = installmentNextDate(it, next);
+    next = installmentAfter(it, next, paid);
     iterations++;
   }
   return out;
@@ -1605,13 +1632,42 @@ function setupBarsChart(){
   let rt; window.addEventListener('resize', ()=>{ clearTimeout(rt); rt = setTimeout(renderBarsChart, 150); });
 }
 setupBarsChart();
+/* Compromisos que no están en el saldo de las cuentas: cuotas aún sin cobrar y deudas de la sección Deudas.
+   Una compra a plazos ligada a una deuda no se cuenta aparte (ya está en la deuda). */
+function getNwExtrasOn(){ try{ return localStorage.getItem('libro_nw_extras')==='1'; }catch(e){ return false; } }
+function networthExtras(){
+  const items = [];
+  state.installments.forEach(it=>{
+    if(it.active===false || it.debtId || it.paidInstallments>=it.totalInstallments) return;
+    const acc = getAccount(it.accountId), cur = acc ? acc.currency : state.baseCurrency;
+    const rem = installmentTotals(it).remaining;
+    if(rem>0.004) items.push({kind:'inst', label:it.name, value:-toBase(rem, cur), detail:`${it.totalInstallments-it.paidInstallments} de ${it.totalInstallments} cuotas por pagar`});
+  });
+  state.debts.forEach(d=>{
+    if(d.settled || !(d.amount>0.004)) return;
+    items.push({kind: d.direction==='debo' ? 'owe' : 'owed', label:d.person, value: d.direction==='debo' ? -d.amount : d.amount, detail:d.note||''});
+  });
+  const sum = k => items.filter(i=>i.kind===k).reduce((a,i)=>a+i.value, 0);
+  const inst = sum('inst'), owe = sum('owe'), owed = sum('owed');
+  return {items, inst, owe, owed, total: inst+owe+owed};
+}
 function renderNetWorth(){
   renderBarsChart();
   renderNetChart();
   const totalEl = document.getElementById('networth-total');
   const el = document.getElementById('networth-breakdown');
   if(!totalEl || !el) return;
-  const total = totalBalanceBase(true);
+  const accountsTotal = totalBalanceBase(true);
+  const ex = networthExtras();
+  const exRow = document.getElementById('nw-extras-row'), exToggle = document.getElementById('nw-extras-toggle'), noteEl = document.getElementById('networth-note');
+  const useExtras = ex.items.length>0 && getNwExtrasOn();
+  if(exRow) exRow.style.display = ex.items.length>0 ? '' : 'none';
+  if(exToggle) exToggle.checked = useExtras;
+  if(noteEl){
+    noteEl.style.display = useExtras ? '' : 'none';
+    noteEl.textContent = useExtras ? 'Incluye cuotas y deudas pendientes. El gráfico muestra solo tus cuentas.' : '';
+  }
+  const total = accountsTotal + (useExtras ? ex.total : 0);
   totalEl.textContent = fmtMoney(total);
   totalEl.style.color = total < 0 ? 'var(--over)' : 'var(--text)';
   const byType = {};
@@ -1621,18 +1677,26 @@ function renderNetWorth(){
   });
   const typeLabels = {efectivo:'Efectivo', banco:'Banco', ahorros:'Ahorros', otro:'Otro'};
   const entries = Object.entries(byType).filter(([,v])=>v!==0);
-  if(entries.length===0){ el.innerHTML = '<div class="empty-note">Sin cuentas todavía.</div>'; return; }
-  const maxAbs = Math.max(...entries.map(([,v])=>Math.abs(v))) || 1;
-  el.innerHTML = entries.map(([type,val])=>{
+  if(entries.length===0 && !useExtras){ el.innerHTML = '<div class="empty-note">Sin cuentas todavía.</div>'; return; }
+  const extraRows = useExtras ? [['🧾 Cuotas pendientes', ex.inst], ['🤝 Yo debo', ex.owe], ['🤝 Me deben', ex.owed]].filter(([,v])=>Math.abs(v)>0.004) : [];
+  const maxAbs = Math.max(1, ...entries.map(([,v])=>Math.abs(v)), ...extraRows.map(([,v])=>Math.abs(v)));
+  const row = (label, val, attrs)=>{
     const pct = Math.min(100, Math.abs(val)/maxAbs*100);
     return `
-      <div class="budget-row" data-detail="type" data-detail-type="${type}" style="cursor:pointer;">
-        <div class="budget-top"><div class="budget-cat">${typeLabels[type]||cap(type)}</div><div class="budget-nums">${fmtMoney(val)}</div></div>
+      <div class="budget-row" ${attrs} style="cursor:pointer;">
+        <div class="budget-top"><div class="budget-cat">${label}</div><div class="budget-nums">${fmtMoney(val)}</div></div>
         <div class="budget-track"><div class="budget-fill" style="width:${pct}%; background:${val<0?'var(--over)':'var(--teal)'};"></div></div>
       </div>
     `;
-  }).join('');
+  };
+  el.innerHTML = entries.map(([type,val])=> row(typeLabels[type]||cap(type), val, `data-detail="type" data-detail-type="${type}"`)).join('')
+    + extraRows.map(([label,val])=> row(label, val, 'data-detail="nwx"')).join('');
 }
+document.addEventListener('change', (e)=>{
+  if(!e.target || e.target.id!=='nw-extras-toggle') return;
+  try{ localStorage.setItem('libro_nw_extras', e.target.checked ? '1' : '0'); }catch(err){}
+  renderNetWorth();
+});
 
 function renderGeneralBudget(monthExpenses, elId, pendingFixed){
   const el = document.getElementById(elId || 'general-budget-summary');
@@ -1817,6 +1881,100 @@ function buildDetail(req){
     d.html = accts.length===0 ? '<div class="empty-note">Sin cuentas de este tipo.</div>' : accts.map(a=>
       `<div class="acct-mini-row" data-detail="acct" data-detail-id="${a.id}" style="cursor:pointer;"><span class="name">${escapeHtml(a.name)}${a.visible===false?' <span style="color:var(--text-faint); font-weight:400;">(oculta)</span>':''}</span><span class="amt">${fmtMoney(accountBalance(a.id), a.currency)}</span></div>`
     ).join('');
+  }
+  else if(req.type==='goal'){
+    const g = state.goals.find(x=>x.id===Number(req.id));
+    if(!g){ d.title='Meta'; d.summary='La meta ya no existe.'; return d; }
+    const saved = g.savedAmount||0, target = g.targetAmount||0;
+    const remaining = Math.max(0, target-saved);
+    const pct = target>0 ? Math.min(100, saved/target*100) : 0;
+    d.title = '🌱 '+escapeHtml(g.name);
+    d.summary = `<strong style="color:var(--text);">${fmtMoney(saved)}</strong> de ${fmtMoney(target)} · ${pct.toFixed(0)}%`;
+    const rows = [];
+    rows.push(['Falta por ahorrar', remaining>0.004 ? fmtMoney(remaining) : '¡Meta cumplida! 🎉']);
+    const today = new Date(todayISO()+'T00:00:00');
+    if(g.targetDate && remaining>0.004){
+      const end = new Date(g.targetDate+'T00:00:00');
+      const days = Math.round((end-today)/86400000);
+      if(days<0) rows.push(['Fecha límite', fmtDate(g.targetDate)+' <span class="muted">· vencida</span>']);
+      else {
+        const monthsLeft = Math.max(1, days/30.44);
+        rows.push(['Fecha límite', fmtDate(g.targetDate)+` <span class="muted">· faltan ${days} ${days===1?'día':'días'}</span>`]);
+        rows.push(['Aporte mensual necesario', fmtMoney(remaining/monthsLeft)+'/mes']);
+      }
+    } else if(g.targetDate){
+      rows.push(['Fecha límite', fmtDate(g.targetDate)]);
+    }
+    const monthly = g.monthlyTargetMode==='percent' ? (g.monthlyTargetValue/100)*state.monthlyIncome : (g.monthlyTargetMode==='fixed' ? g.monthlyTargetValue : 0);
+    if(monthly>0){
+      rows.push(['Aporte mensual objetivo', fmtMoney(monthly)+'/mes'+(g.monthlyTargetMode==='percent'?` <span class="muted">· ${g.monthlyTargetValue}% de tu sueldo</span>`:'')]);
+      if(remaining>0.004){
+        const n = Math.ceil(remaining/monthly);
+        const est = new Date(today.getFullYear(), today.getMonth()+n, today.getDate());
+        rows.push(['Al ritmo objetivo la completas', cap(est.toLocaleDateString('es-ES',{month:'long', year:'numeric'}))+` <span class="muted">· ${n} ${n===1?'mes':'meses'}</span>`]);
+      }
+    }
+    d.html = `<div class="detail-kv">${rows.map(([k,v])=>`<div class="detail-kv-row"><span>${k}</span><span>${v}</span></div>`).join('')}</div>`;
+    d.actions = `<button type="button" class="btn-secondary" data-goal-add="${g.id}">+ Añadir aporte</button>`;
+  }
+  else if(req.type==='debt'){
+    const db = state.debts.find(x=>x.id===Number(req.id));
+    if(!db){ d.title='Deuda'; d.summary='La deuda ya no existe.'; return d; }
+    const original = db.originalAmount || db.amount;
+    const paid = Math.max(0, original-db.amount);
+    const list = state.transactions.filter(t=>t.debtId===db.id);
+    d.title = '🤝 '+escapeHtml(db.person);
+    d.summary = `${db.direction==='debo'?'Yo debo':'Me deben'} · Pendiente: <strong style="color:var(--text);">${fmtMoney(db.amount)}</strong>${db.settled?' · Liquidada':''}`
+      + (original>0 && paid>0.004 ? `<div style="margin-top:4px;">Pagado ${fmtMoney(paid)} de ${fmtMoney(original)}</div>` : '')
+      + (db.note ? `<div style="margin-top:4px;">${escapeHtml(db.note)}</div>` : '');
+    d.list = sortLedgerDesc(list);
+    if(list.length===0) d.html = '<div class="empty-note">Aún no hay movimientos ligados a esta deuda. Al registrar un gasto o ingreso con "Deuda relacionada" aparecerá aquí.</div>';
+  }
+  else if(req.type==='nwx'){
+    const ex = networthExtras();
+    d.title = '🧾 Cuotas y deudas pendientes';
+    d.summary = `Efecto total en tu patrimonio: <strong style="color:var(--text);">${fmtMoney(ex.total)}</strong>`;
+    const group = (title, kind)=>{
+      const its = ex.items.filter(i=>i.kind===kind);
+      if(!its.length) return '';
+      return `<div class="cmp-sep">${title}</div><div class="detail-kv">${its.map(i=>`<div class="detail-kv-row"><span>${escapeHtml(i.label)}${i.detail?` <span class="muted">· ${escapeHtml(i.detail)}</span>`:''}</span><span>${fmtMoney(i.value)}</span></div>`).join('')}</div>`;
+    };
+    d.html = (group('Compras a plazos por pagar','inst') + group('Yo debo','owe') + group('Me deben','owed')) || '<div class="empty-note">Sin cuotas ni deudas pendientes.</div>';
+  }
+  else if(req.type==='cmp'){
+    const ref = new Date(state.resumenPeriod.ref+'T00:00:00');
+    const prevRef = new Date(ref.getFullYear(), ref.getMonth()-1, 1);
+    const tot = (r)=>{
+      const items = txInRange(state.transactions, toISO(startOfMonth(r)), toISO(endOfMonth(r)));
+      const byCat = {}; let inc=0, exp=0;
+      items.forEach(t=>{
+        const v = sumBase([t]);
+        if(t.kind==='income') inc += v;
+        else if(t.kind==='expense'){ exp += v; byCat[t.categoryId] = (byCat[t.categoryId]||0)+v; }
+      });
+      return {inc, exp, byCat};
+    };
+    const A = tot(ref), B = tot(prevRef);
+    const nameOf = r => cap(r.toLocaleDateString('es-ES',{month:'long', year:'numeric'}));
+    d.title = '📊 Mes vs mes anterior';
+    d.summary = `${nameOf(ref)} <span class="muted">frente a</span> ${nameOf(prevRef)}`;
+    const delta = (a,b,goodWhenLower)=>{
+      const diff = a-b;
+      if(Math.abs(diff)<0.005) return '<span class="muted">·</span>';
+      const bad = goodWhenLower ? diff>0 : diff<0;
+      return `<span style="color:${bad?'var(--over)':'var(--teal)'};">${diff>0?'▲':'▼'} ${fmtMoney(Math.abs(diff))}</span>`;
+    };
+    const row = (label, a, b, lower, bold)=>`<div class="cmp-row${bold?' cmp-bold':''}"><span class="cmp-name">${label}</span><span class="cmp-val">${fmtMoney(a)}</span><span class="cmp-val muted">${fmtMoney(b)}</span><span class="cmp-delta">${delta(a,b,lower)}</span></div>`;
+    const ids = [...new Set([...Object.keys(A.byCat), ...Object.keys(B.byCat)])]
+      .sort((x,y)=> Math.max(B.byCat[y]||0, A.byCat[y]||0) - Math.max(B.byCat[x]||0, A.byCat[x]||0));
+    d.html = `<div class="cmp-table">
+      <div class="cmp-row cmp-head"><span class="cmp-name"></span><span class="cmp-val">${cap(ref.toLocaleDateString('es-ES',{month:'short'}))}</span><span class="cmp-val">${cap(prevRef.toLocaleDateString('es-ES',{month:'short'}))}</span><span class="cmp-delta">Dif.</span></div>
+      ${row('Ingresos', A.inc, B.inc, false, true)}
+      ${row('Gastos', A.exp, B.exp, true, true)}
+      ${row('Neto', A.inc-A.exp, B.inc-B.exp, false, true)}
+      <div class="cmp-sep">Gastos por categoría</div>
+      ${ids.length ? ids.map(id=>{ const c=getCategory(Number(id)); return row(c ? catIcon(c)+' '+escapeHtml(c.name) : 'Sin categoría', A.byCat[id]||0, B.byCat[id]||0, true); }).join('') : '<div class="empty-note">Sin gastos en estos dos meses.</div>'}
+    </div>`;
   }
   if(req.prev) d.actions = `<button type="button" class="btn-secondary" data-detail-back="1">← Volver</button> ` + d.actions;
   return d;
@@ -2228,7 +2386,7 @@ function renderCuentas(){
   const el = document.getElementById('accounts-list');
   el.innerHTML = '';
   if(state.accounts.length===0){
-    el.innerHTML = '<div class="empty-note">Añade tu primera cuenta abajo.</div>';
+    el.innerHTML = emptyState('🏦','Sin cuentas todavía','Crea tu primera cuenta (efectivo, banco, tarjeta…) con el formulario de abajo.','Crear cuenta','focus-account');
   } else {
     const sortMode = document.getElementById('account-sort').value;
     let accountsSorted = state.accounts.slice();
@@ -2425,7 +2583,7 @@ function renderMas(){
   const goalsEl = document.getElementById('goals-list');
   goalsEl.innerHTML = '';
   if(state.goals.length===0){
-    goalsEl.innerHTML = '<div class="empty-note">Aún no has creado metas de ahorro.</div>';
+    goalsEl.innerHTML = emptyState('🌱','Sin metas de ahorro','Define algo por lo que quieras ahorrar y sigue tu avance.','Crear meta','goal');
   } else {
     state.goals.forEach(g=>{
       const pct = g.targetAmount>0 ? Math.min(100, (g.savedAmount||0)/g.targetAmount*100) : 0;
@@ -2436,7 +2594,7 @@ function renderMas(){
       const div = document.createElement('div');
       div.className = 'budget-row';
       div.innerHTML = `
-        <div class="budget-top">
+        <div class="budget-top" data-detail="goal" data-detail-id="${g.id}" style="cursor:pointer;" title="Ver detalle de la meta">
           <div class="budget-cat">${escapeHtml(g.name)} ${g.targetDate?`<span style="color:var(--text-faint); font-weight:400; font-size:12px;">· ${fmtDate(g.targetDate)}</span>`:''}</div>
           <div class="budget-nums">${fmtMoney(g.savedAmount||0)} / ${fmtMoney(g.targetAmount)}</div>
         </div>
@@ -2493,7 +2651,7 @@ function renderMas(){
   const recEl = document.getElementById('recurring-list');
   recEl.innerHTML = '';
   if(state.recurring.length===0){
-    recEl.innerHTML = '<div class="empty-note">Sin movimientos recurrentes todavía.</div>';
+    recEl.innerHTML = emptyState('🔁','Sin recurrentes','Alquiler, suscripciones, sueldo… se registran solos en su fecha.','Añadir recurrente','recurring');
   } else {
     state.recurring.forEach(r=>{
       const freqLabel = r.frequency==='cycle' ? `Cada ${r.cycleDays} días` : ({weekly:'Semanal', monthly:'Mensual', yearly:'Anual'}[r.frequency] || r.frequency);
@@ -2576,7 +2734,7 @@ function renderMas(){
   const remEl = document.getElementById('reminders-list');
   remEl.innerHTML = '';
   if(state.reminders.length===0){
-    remEl.innerHTML = '<div class="empty-note">Sin recordatorios.</div>';
+    remEl.innerHTML = emptyState('🔔','Sin recordatorios','Anota pagos o tareas para no olvidarlos.','Añadir recordatorio','reminder');
   } else {
     state.reminders.forEach(r=>{
       const wrap = document.createElement('div');
@@ -2610,7 +2768,7 @@ function renderMas(){
   const debtsEl = document.getElementById('debts-list');
   debtsEl.innerHTML = '';
   if(state.debts.length===0){
-    debtsEl.innerHTML = '<div class="empty-note">Sin deudas ni préstamos registrados.</div>';
+    debtsEl.innerHTML = emptyState('🤝','Sin deudas ni préstamos','Registra lo que debes o te deben y ve los abonos.','Añadir deuda','debt');
   } else {
     state.debts.forEach(d=>{
       const original = d.originalAmount || d.amount;
@@ -2620,7 +2778,7 @@ function renderMas(){
       div.className = 'account-card' + (d.settled ? ' hidden-acct' : '');
       div.innerHTML = `
         <div class="acct-main-row">
-        <div>
+        <div data-detail="debt" data-detail-id="${d.id}" style="cursor:pointer;" title="Ver detalle de la deuda">
           <div class="acct-name">${escapeHtml(d.person)}</div>
           <div class="acct-meta">${d.direction==='debo'?'Yo debo':'Me deben'} ${d.note?'· '+escapeHtml(d.note):''} ${d.settled?'· Liquidada':''}</div>
         </div>
@@ -2663,12 +2821,12 @@ function renderMas(){
   const instEl = document.getElementById('installments-list');
   instEl.innerHTML = '';
   if(state.installments.length===0){
-    instEl.innerHTML = '<div class="empty-note">Sin compras a plazos registradas.</div>';
+    instEl.innerHTML = emptyState('🧾','Sin compras a plazos','Registra compras en cuotas para verlas en tu flujo de caja.','Añadir compra a plazos','installment');
   } else {
     state.installments.forEach(it=>{
       const acc = getAccount(it.accountId);
       const pct = it.totalInstallments>0 ? Math.min(100, it.paidInstallments/it.totalInstallments*100) : 0;
-      const nextDate = it.paidInstallments < it.totalInstallments ? (it.lastGenerated ? installmentNextDate(it, it.lastGenerated) : it.startDate) : null;
+      const nextDate = it.paidInstallments < it.totalInstallments ? installmentUpcomingDate(it) : null;
       const totals = installmentTotals(it);
       const curr = acc?acc.currency:state.baseCurrency;
       const div = document.createElement('div');
@@ -2679,7 +2837,7 @@ function renderMas(){
           <div class="budget-nums">Cuota ${it.paidInstallments} / ${it.totalInstallments}</div>
         </div>
         <div class="budget-track"><div class="budget-fill" style="width:${pct}%"></div></div>
-        <div class="stat-sub" style="margin-top:6px;">Pagado ${fmtMoney(totals.paid, curr)} de ${fmtMoney(totals.total, curr)} · Adeudado ${fmtMoney(totals.remaining, curr)}</div>
+        <div class="stat-sub" style="margin-top:6px;">${it.payDay ? `${it.initialCount>1?it.initialCount+' al inicio · ':''}luego el día ${it.payDay} · ` : ''}Pagado ${fmtMoney(totals.paid, curr)} de ${fmtMoney(totals.total, curr)} · Adeudado ${fmtMoney(totals.remaining, curr)}</div>
         <div style="display:flex; justify-content:space-between; align-items:center; margin-top:8px;">
           <div class="stat-sub">${it.paidInstallments>=it.totalInstallments ? '✔ Pagada por completo' : (nextDate ? `Próximo pago: ${fmtDate(nextDate)} · ${fmtMoney(installmentAmountFor(it, it.paidInstallments), curr)}` : '')}</div>
           <div style="display:flex; gap:8px;">
@@ -2973,7 +3131,18 @@ function splitValues(p){
   const total = parseFloat(document.getElementById(p+'-amount').value);
   const n = parseInt(document.getElementById(p+'-split-n').value, 10);
   const real = parseFloat(document.getElementById(p+'-split-real').value);
-  return {total, n, real: real>0 ? real : null};
+  const k = parseInt(document.getElementById(p+'-split-initial').value, 10);
+  const day = parseInt(document.getElementById(p+'-split-day').value, 10);
+  return {total, n, real: real>0 ? real : null, k: k>0 ? k : null, day: day>0 ? day : null};
+}
+/* Opciones de calendario: null si no se pidió nada especial (modo de siempre), o {initialCount, payDay} */
+function splitCalendar(n, k, day, dateISO){
+  if(!k && !day) return {opts:null};
+  if(k && k>n-1) return {error:'Las cuotas al inicio deben ser menos que el total ('+(n-1)+' como máximo)'};
+  if(day && day>31) return {error:'El día debe estar entre 1 y 31'};
+  const initialCount = k || 1;
+  if(initialCount===1 && !day) return {opts:null};
+  return {opts:{initialCount, payDay: day || Number(dateISO.slice(8,10))}};
 }
 function splitSchedule(total, n, real){
   return real ? new Array(n).fill(Math.round(real*100)/100) : buildEqualSchedule(total, n);
@@ -3006,7 +3175,7 @@ function updateSplitHint(p){
   if(!on){ hint.textContent = ''; return; }
   const nInput = document.getElementById(p+'-split-n').value;
   document.querySelectorAll('[data-split-target="'+p+'"]').forEach(b=> b.classList.toggle('active', b.dataset.splitN===String(nInput)));
-  const {total, n, real} = splitValues(p);
+  const {total, n, real, k, day} = splitValues(p);
   if(!total || total<=0 || !n || n<2){ hint.textContent = 'Indica el importe y 2 cuotas o más.'; return; }
   const acc = splitAccount(p), cur = acc.currency;
   const sched = splitSchedule(total, n, real);
@@ -3022,20 +3191,33 @@ function updateSplitHint(p){
   }
   const date = document.getElementById(p+'-date').value || todayISO();
   const c = cutoffForPurchase(acc, date);
-  line += '<br>Primera cuota el ' + fmtDate(date) + (c ? ', entra en el corte del ' + fmtDate(c.cutoff) + (c.pay ? ' (se paga el ' + fmtDate(c.pay) + ')' : '') : '') + '. Luego, el mismo día de cada mes.';
+  const cal = splitCalendar(n, k, day, date);
+  if(cal.error){ hint.innerHTML = line + '<br><span style="color:var(--over);">'+cal.error+'</span>'; return; }
+  if(cal.opts){
+    const fake = {startDate:date, initialCount:cal.opts.initialCount, payDay:cal.opts.payDay};
+    const ini = cal.opts.initialCount;
+    line += '<br>' + (ini===1 ? 'Cuota 1' : 'Cuotas 1 a '+ini) + ' el ' + fmtDate(date) + (c ? ', entra en el corte del ' + fmtDate(c.cutoff) + (c.pay ? ' (se paga el ' + fmtDate(c.pay) + ')' : '') : '')
+      + '.<br>Cuota ' + (ini+1) + ' el ' + fmtDate(installmentDateAt(fake, ini)) + (n>ini+1 ? ', y luego el día ' + cal.opts.payDay + ' de cada mes hasta el ' + fmtDate(installmentDateAt(fake, n-1)) : '') + '.';
+  } else {
+    line += '<br>Primera cuota el ' + fmtDate(date) + (c ? ', entra en el corte del ' + fmtDate(c.cutoff) + (c.pay ? ' (se paga el ' + fmtDate(c.pay) + ')' : '') : '') + '. Luego, el mismo día de cada mes.';
+  }
   hint.innerHTML = line;
 }
 function resetSplit(p){
   document.getElementById(p+'-split-toggle').checked = false;
   document.getElementById(p+'-split-n').value = '';
   document.getElementById(p+'-split-real').value = '';
+  document.getElementById(p+'-split-initial').value = '';
+  document.getElementById(p+'-split-day').value = '';
   updateSplitHint(p);
 }
 /* Crea la compra a plazos en lugar del gasto único (así no se cuenta dos veces) */
 async function createSplitPlan(p, accountId, categoryId, subcategory, dateISO, note){
-  const {total, n, real} = splitValues(p);
+  const {total, n, real, k, day} = splitValues(p);
   if(!total || total<=0){ toast('Introduce un importe válido'); return null; }
   if(!n || n<2){ toast('Indica 2 cuotas o más'); return null; }
+  const cal = splitCalendar(n, k, day, dateISO);
+  if(cal.error){ toast(cal.error); return null; }
   const cat = getCategory(categoryId);
   const schedule = splitSchedule(total, n, real);
   const sum = Math.round(schedule.reduce((s,v)=>s+v,0)*100)/100;
@@ -3043,7 +3225,8 @@ async function createSplitPlan(p, accountId, categoryId, subcategory, dateISO, n
     name: note || (cat ? cat.name : 'Compra a plazos'),
     accountId, amount: schedule[0], totalAmount: sum, schedule, totalInstallments: n, paidInstallments: 0,
     categoryId, subcategory: subcategory || '', startDate: dateISO, lastGenerated: null,
-    note: '', person: '', debtId: null, active: true
+    note: '', person: '', debtId: null, active: true,
+    ...(cal.opts ? {initialCount: cal.opts.initialCount, payDay: cal.opts.payDay} : {})
   });
   await loadAll();
   await generateDueInstallments();
@@ -3065,7 +3248,7 @@ function setupSplit(){
     const refresh = ()=> updateSplitHint(p);
     document.getElementById(p+'-account').addEventListener('change', refresh);
     document.getElementById(p+'-split-toggle').addEventListener('change', refresh);
-    [p+'-amount', p+'-split-n', p+'-split-real'].forEach(id=> document.getElementById(id).addEventListener('input', refresh));
+    [p+'-amount', p+'-split-n', p+'-split-real', p+'-split-initial', p+'-split-day'].forEach(id=> document.getElementById(id).addEventListener('input', refresh));
     document.getElementById(p+'-date').addEventListener('change', refresh);
     document.querySelectorAll('#'+p+'-type-toggle .type-btn').forEach(b=> b.addEventListener('click', refresh));
   });
@@ -3780,6 +3963,28 @@ function exitEditMode(){
   populateDebtUnified('tx', state.txType, false);
 }
 
+/* ===== Pantallas vacías con acción ===== */
+function emptyState(icon, title, text, btnLabel, action){
+  return `<div class="empty-state"><div class="empty-ico">${icon}</div><div class="empty-title">${title}</div><div class="empty-text">${text}</div>${btnLabel?`<button type="button" class="btn-secondary btn-sm" data-empty-action="${action}">${btnLabel}</button>`:''}</div>`;
+}
+const EMPTY_ACTIONS = {
+  'add-tx': ()=> openQuickAdd(),
+  'goal': ()=> document.getElementById('open-goal-modal').click(),
+  'recurring': ()=> document.getElementById('open-recurring-modal').click(),
+  'reminder': ()=> document.getElementById('open-reminder-modal').click(),
+  'debt': ()=> document.getElementById('open-debt-modal').click(),
+  'installment': ()=> document.getElementById('open-installment-modal').click(),
+  'goto-cuentas': ()=> document.querySelectorAll('.nav-btn[data-view="cuentas"]')[0].click(),
+  'goto-presupuestos': ()=> document.querySelectorAll('.nav-btn[data-view="presupuestos"]')[0].click(),
+  'focus-account': ()=>{ const i=document.getElementById('acc-name'); if(i){ i.scrollIntoView({behavior:'smooth',block:'center'}); i.focus(); } },
+};
+document.addEventListener('click', (e)=>{
+  const b = e.target.closest('[data-empty-action]');
+  if(!b) return;
+  const fn = EMPTY_ACTIONS[b.dataset.emptyAction];
+  if(fn) fn();
+});
+
 /* ================= Quick add (Resumen) ================= */
 function renderQuickAdd(){
   const isTransfer = state.qkType === 'transfer';
@@ -3798,6 +4003,47 @@ function renderQuickAdd(){
   }
   setDateValue('qk', document.getElementById('qk-date').value || todayISO());
   updateSplitHint('qk');
+  renderQkRepeat();
+}
+/* ===== Repetir último gasto ===== */
+function lastManualExpense(){
+  let best = null;
+  state.transactions.forEach(t=>{
+    if(t.kind!=='expense' || t.source) return;          // solo gastos escritos a mano
+    if(!getCategory(t.categoryId) || !getAccount(t.accountId)) return;
+    if(!best || t.id > best.id) best = t;
+  });
+  return best;
+}
+function renderQkRepeat(){
+  const el = document.getElementById('qk-repeat');
+  if(!el) return;
+  const t = state.qkType==='expense' ? lastManualExpense() : null;
+  if(!t){ el.style.display='none'; el.innerHTML=''; return; }
+  const cat = getCategory(t.categoryId), acc = getAccount(t.accountId);
+  const label = (t.note || cat.name);
+  el.style.display = 'block';
+  el.innerHTML = `<button type="button" class="qk-repeat-btn" data-qk-repeat="${t.id}">
+    <span class="qk-repeat-ico">↻</span>
+    <span class="qk-repeat-txt"><strong>Repetir último gasto</strong><span>${escapeHtml(label)} · ${fmtMoney(t.amount, acc.currency)}</span></span>
+  </button>`;
+}
+function applyQkRepeat(id){
+  const t = state.transactions.find(x=>x.id===Number(id));
+  if(!t) return;
+  const allCats = sortedCategories('expense');
+  const idx = allCats.findIndex(c=>c.id===t.categoryId);
+  if(idx >= QK_CATEGORY_LIMIT) state.qkCategoryExpanded = true;
+  document.getElementById('qk-amount').value = t.amount;
+  document.getElementById('qk-account').value = String(t.accountId);
+  document.getElementById('qk-category').value = String(t.categoryId);
+  populateQkSubcategory();
+  const sub = document.getElementById('qk-subcategory');
+  if([...sub.options].some(o=>o.value===(t.subcategory||''))) sub.value = t.subcategory||'';
+  renderQkCategoryGrid();
+  document.getElementById('qk-note').value = t.note || '';
+  setDateValue('qk', todayISO());
+  toast('Datos copiados · revisa y pulsa Listo');
 }
 const QK_CATEGORY_LIMIT = 7;
 function renderQkCategoryGrid(){
@@ -3913,6 +4159,7 @@ function setupQuickAdd(){
         populateAccountSelects();
         populateTransferCategorySelects();
       }
+      renderQkRepeat();
     });
   });
   document.getElementById('qk-debt').addEventListener('change', updateQkDebtUI);
@@ -3932,6 +4179,8 @@ function setupQuickAdd(){
       renderQkCategoryGrid();
       return;
     }
+    const rep = e.target.closest('[data-qk-repeat]');
+    if(rep){ applyQkRepeat(rep.dataset.qkRepeat); return; }
     const catMore = e.target.closest('[data-qk-cat-more]');
     if(catMore){
       state.qkCategoryExpanded = true;
