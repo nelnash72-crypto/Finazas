@@ -661,6 +661,86 @@ function cardPendingInstallments(accountId){
   }, 0);
 }
 
+/* ================= Tarjeta: en qué mes se paga lo gastado ================= */
+// Los gastos se muestran por fecha de compra (mes calendario). Esto añade una referencia: de lo gastado con tarjeta
+// en un periodo, cuánto ya pasó el corte y se paga después, y cuánto se paga dentro del periodo por compras anteriores.
+function cardPayInfo(t){
+  if(t.kind!=='expense') return null;
+  const a = getAccount(t.accountId);
+  if(!a || a.type!=='tarjeta_credito' || !a.paymentDay) return null;
+  const cutoff = cardTxCutoff(a, t);
+  return {acc:a, cutoff, pay: paymentDateForCutoff(cutoff, a.paymentDay)};
+}
+function cardCashView(start, end){
+  const v = {later:0, laterByMonth:{}, laterByCat:{}, laterItems:[], sameRange:0, paidBefore:0, paidBeforeGroups:{}, laterGroups:{}, cardTotal:0};
+  const grp = (map, info, amt)=>{
+    const k = info.acc.id+'|'+info.cutoff;
+    if(!map[k]) map[k] = {acc:info.acc, cutoff:info.cutoff, pay:info.pay, total:0};
+    map[k].total += amt;
+  };
+  state.transactions.forEach(t=>{
+    const info = cardPayInfo(t); if(!info) return;
+    const amt = toBase(t.amount, info.acc.currency);
+    const inRange = t.date>=start && t.date<=end;
+    const payInRange = info.pay>=start && info.pay<=end;
+    if(inRange){
+      v.cardTotal += amt;
+      if(info.pay > end){
+        v.later += amt;
+        const ym = info.pay.slice(0,7);
+        v.laterByMonth[ym] = (v.laterByMonth[ym]||0) + amt;
+        v.laterByCat[t.categoryId] = (v.laterByCat[t.categoryId]||0) + amt;
+        v.laterItems.push(t);
+        grp(v.laterGroups, info, amt);
+      } else if(payInRange) v.sameRange += amt;
+    } else if(t.date < start && payInRange){
+      v.paidBefore += amt;
+      grp(v.paidBeforeGroups, info, amt);
+    }
+  });
+  return v;
+}
+function cardMonthLabel(ym){
+  const d = new Date(ym+'-01T00:00:00');
+  const same = d.getFullYear() === new Date().getFullYear();
+  return d.toLocaleDateString('es-ES', same ? {month:'short'} : {month:'short', year:'2-digit'}).replace('.','');
+}
+function cardCashLineHtml(start, end){
+  const v = cardCashView(start, end);
+  if(v.later<=0.004 && v.paidBefore<=0.004) return '';
+  const parts = [];
+  if(v.later>0.004){
+    const months = Object.keys(v.laterByMonth).sort().map(ym=>`${cardMonthLabel(ym)} ${fmtMoney(v.laterByMonth[ym])}`).join(' · ');
+    parts.push(`💳 Con tarjeta, <strong>${fmtMoney(v.later)}</strong> de estos gastos se paga después (${months})`);
+  }
+  if(v.paidBefore>0.004) parts.push(`en este periodo también pagas <strong>${fmtMoney(v.paidBefore)}</strong> de compras anteriores`);
+  return parts.join(' · ') + ' <span class="card-cash-more">Ver detalle ›</span>';
+}
+function renderCardCashLine(elId, start, end, detailReq){
+  const el = document.getElementById(elId); if(!el) return;
+  const html = cardCashLineHtml(start, end);
+  el.style.display = html ? '' : 'none';
+  el.innerHTML = html;
+  if(html){ el.dataset.detail = 'cardcash'; el.dataset.detailStart = start; el.dataset.detailEnd = end; }
+}
+function detail_cardcash(req, d){
+  const v = cardCashView(req.start, req.end);
+  d.title = '💳 Tarjeta: en qué mes se paga';
+  d.summary = `Gastos con tarjeta en el periodo: <strong style="color:var(--text);">${fmtMoney(v.cardTotal)}</strong>`
+    + `<div style="margin-top:4px;">${fmtDate(req.start)} – ${fmtDate(req.end)}</div>`;
+  const rows = (map)=> Object.values(map).sort((a,b)=>a.pay.localeCompare(b.pay)).map(g=>
+    `<div class="detail-kv-row"><span>${escapeHtml(g.acc.name)} <span class="muted">· corte ${fmtDate(g.cutoff)} · se paga ${fmtDate(g.pay)}</span></span><span>${fmtMoney(g.total, state.baseCurrency)}</span></div>`).join('');
+  let html = '';
+  html += `<div class="cmp-sep">Compras de este periodo que se pagan después · ${fmtMoney(v.later)}</div>`;
+  html += v.later>0.004 ? `<div class="detail-kv">${rows(v.laterGroups)}</div>` : '<div class="empty-note">Ninguna: todo lo de tarjeta se paga dentro del periodo.</div>';
+  html += `<div class="cmp-sep">Compras de este periodo que se pagan dentro de él · ${fmtMoney(v.sameRange)}</div>`;
+  if(v.paidBefore>0.004){
+    html += `<div class="cmp-sep">Compras de antes del periodo que pagas dentro de él · ${fmtMoney(v.paidBefore)}</div><div class="detail-kv">${rows(v.paidBeforeGroups)}</div>`;
+  }
+  d.html = html;
+  d.list = sortLedgerDesc(v.laterItems);
+}
+
 /* ================= Balances ================= */
 function accountBalance(accId){
   let bal = 0;
@@ -969,6 +1049,7 @@ function renderResumen(){
     const netEl = document.getElementById('stat-net');
     netEl.textContent = fmtMoney(income-expense);
     netEl.style.color = (income-expense) < 0 ? 'var(--over)' : 'var(--text)';
+    renderCardCashLine('card-cash-line', range.start, range.end);
     renderIncomeSplit(periodTx, income, expense);
 
     const compareEl = document.getElementById('stat-compare');
@@ -1074,6 +1155,7 @@ const RESUMEN_BLOCK_HTML = {
           <div class="stat-sub" id="stat-compare"></div>
         </div>
       </div>
+      <div class="card-cash-line" id="card-cash-line" style="display:none;"></div>
       <div class="section-title" style="font-size:15px;">¿A dónde va tu ingreso?</div>
       <div id="resumen-split" style="margin-bottom:22px;"></div>
       <div class="section-title" style="font-size:15px;">Gastos por categoría</div>
@@ -1826,7 +1908,7 @@ function renderGeneralBudget(monthExpenses, elId, pendingFixed){
   `;
 }
 
-function budgetRowEl(name, spent, limit, categoryId){
+function budgetRowEl(name, spent, limit, categoryId, cardLater){
   const div = document.createElement('div');
   div.className = 'budget-row';
   const pct = limit>0 ? Math.min(100,(spent/limit)*100) : 0;
@@ -1835,6 +1917,7 @@ function budgetRowEl(name, spent, limit, categoryId){
   div.innerHTML = `
     <div class="budget-top"><div class="budget-cat">${escapeHtml(name)}</div><div class="budget-nums">${fmtMoney(spent)} / ${fmtMoney(limit)}</div></div>
     <div class="budget-track"><div class="budget-fill ${over?'over':(warn?'warn':'')}" style="width:${pct}%"></div></div>
+    ${cardLater>0.004 ? `<div class="stat-sub card-later-note">💳 ${fmtMoney(cardLater)} con tarjeta se paga después del corte</div>` : ''}
   `;
   if(categoryId){
     div.style.cursor = 'pointer';
@@ -2048,7 +2131,8 @@ const DETAIL_BUILDERS = {
   goal: detail_goal,
   debt: detail_debt,
   nwx: detail_nwx,
-  cmp: detail_compare
+  cmp: detail_compare,
+  cardcash: detail_cardcash
 };
 
 function buildDetail(req){
@@ -2086,7 +2170,7 @@ function refreshDetailModal(){
   if(detailRequest && ov && ov.style.display!=='none') renderDetailModal();
 }
 function reqFromTrigger(el){
-  return {type: el.dataset.detail, catId: el.dataset.detailCat, id: el.dataset.detailId, acctType: el.dataset.detailType};
+  return {type: el.dataset.detail, catId: el.dataset.detailCat, id: el.dataset.detailId, acctType: el.dataset.detailType, start: el.dataset.detailStart, end: el.dataset.detailEnd};
 }
 function setupDetailModal(){
   document.getElementById('detail-close').addEventListener('click', ()=> history.back());
@@ -2760,6 +2844,8 @@ function renderPresupuestos(){
   monthExpenses.forEach(t=>{ const acc=getAccount(t.accountId); const amt=toBase(t.amount, acc?acc.currency:state.baseCurrency); spendByCat[t.categoryId]=(spendByCat[t.categoryId]||0)+amt; });
 
   renderGeneralBudget(monthExpenses, undefined, computeMonthFixedProjection(mStart, mEnd));
+  renderCardCashLine('presupuestos-card-cash', mStart, mEnd);
+  const cardLater = cardCashView(mStart, mEnd).laterByCat;
 
   const incomeInput = document.getElementById('monthly-income-input');
   if(incomeInput && document.activeElement !== incomeInput) incomeInput.value = state.monthlyIncome || '';
@@ -2772,7 +2858,7 @@ function renderPresupuestos(){
   if(active.length===0){
     progEl.innerHTML = '<div class="empty-note">Fija límites abajo para ver tu progreso mensual aquí.</div>';
   } else {
-    active.forEach(c => progEl.appendChild(budgetRowEl(catIcon(c)+' '+c.name, spendByCat[c.id]||0, state.budgets[c.id]||0, c.id)));
+    active.forEach(c => progEl.appendChild(budgetRowEl(catIcon(c)+' '+c.name, spendByCat[c.id]||0, state.budgets[c.id]||0, c.id, cardLater[c.id]||0)));
   }
 
   const editEl = document.getElementById('presupuestos-edit');

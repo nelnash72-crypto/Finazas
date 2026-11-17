@@ -1,4 +1,4 @@
-const CACHE_NAME = 'libro-finanzas-v30';
+const CACHE_NAME = 'libro-finanzas-v31';
 const ASSETS = [
   './',
   './index.html',
