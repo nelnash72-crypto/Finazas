@@ -450,7 +450,8 @@ function nextRecurringDate(dateStr, freq){
 async function generateDueRecurring(){
   const today = todayISO();
   for(const r of state.recurring){
-    if(r.active===false || r.frequency==='cycle') continue;  // los de ciclo se registran a mano
+    if(r.active===false) continue;
+    if(r.frequency==='cycle'){ if(r.autoCharge) await generateAutoCycle(r); continue; }  // los de ciclo sin débito automático se registran a mano
     let next = r.lastGenerated ? nextRecurringDate(r.lastGenerated, r.frequency) : r.startDate;
     let iterations = 0;
     let changed = false;
@@ -472,6 +473,27 @@ async function generateDueRecurring(){
     }
     if(changed) await idb.put('recurring', r);
   }
+}
+
+/* Cada N días con débito automático: se registra en cada fecha programada (nextDue) y el siguiente cobro
+   se cuenta desde esa fecha programada, no desde el día en que se abre la app (así no se acumula desfase). */
+async function generateAutoCycle(r){
+  if(r.isTransfer) return;
+  const today = todayISO();
+  const days = Math.max(1, Number(r.cycleDays)||30);
+  let next = cycleNextDue(r);
+  let iterations = 0, changed = false;
+  while(next && next <= today && iterations < 60){
+    const txRecord = {accountId:r.accountId, kind:r.kind, amount:r.amount, categoryId:r.categoryId, subcategory:r.subcategory||'', date:next, note:(r.note ? r.note+' · ' : '')+'Recurrente', debtId:r.debtId||null, debtEffect:r.debtId?(r.debtEffect||'payment'):null, source:'recurring'};
+    txRecord.id = await idb.put('transactions', txRecord);
+    state.transactions.push(txRecord);
+    if(r.debtId) await applyDebtEffect(r.debtId, r.debtEffect||'payment', r.amount);
+    r.lastGenerated = next;
+    next = addDaysISO(next, days);
+    r.nextDue = next;
+    changed = true; iterations++;
+  }
+  if(changed) await idb.put('recurring', r);
 }
 
 /* Siguiente cuota: mismo día de cada mes (el día de inicio), ajustado a fin de mes si no existe (29/30/31) */
@@ -1264,9 +1286,9 @@ function setupResumenLayoutSettings(){
 }
 
 
-/* ===== Gastos por ciclo (cada N días, renovación manual) ===== */
+/* ===== Gastos por ciclo (cada N días: manual, o automático si autoCharge) ===== */
 function cycleDueList(){
-  return state.recurring.filter(r=> r.frequency==='cycle' && r.active!==false && !r.isTransfer);
+  return state.recurring.filter(r=> r.frequency==='cycle' && !r.autoCharge && r.active!==false && !r.isTransfer);
 }
 async function registerCycle(id, dateISO){
   const r = state.recurring.find(x=>x.id===id);
@@ -1291,8 +1313,8 @@ async function postponeCycle(id, dateISO){
   toast('Pospuesto al ' + fmtDate(dateISO));
 }
 function cycleActionsHtml(r){
-  return `<button type="button" class="btn-secondary btn-sm" data-cycle-pay="${r.id}">Registrar</button>
-    <label class="date-cal-btn" title="Posponer / cambiar fecha" style="margin-left:0; display:inline-flex; vertical-align:middle;"><span>📅 Posponer</span><input type="date" data-cycle-postpone="${r.id}" value="${cycleNextDue(r)}"></label>`;
+  return `${r.autoCharge ? '' : `<button type="button" class="btn-secondary btn-sm" data-cycle-pay="${r.id}">Registrar</button>`}
+    <label class="date-cal-btn" title="${r.autoCharge?'Cambiar la fecha del próximo cobro':'Posponer / cambiar fecha'}" style="margin-left:0; display:inline-flex; vertical-align:middle;"><span>📅 ${r.autoCharge?'Cambiar fecha':'Posponer'}</span><input type="date" data-cycle-postpone="${r.id}" value="${cycleNextDue(r)}"></label>`;
 }
 /* Reparto del ingreso: prioritarios (fijos: recurrentes y cuotas) / variables / lo que sobra */
 function isFixedTx(t){ return t.source==='recurring' || t.source==='installment'; }
@@ -3242,7 +3264,7 @@ function renderRecurringList(){
     recEl.innerHTML = emptyState('🔁','Sin recurrentes','Alquiler, suscripciones, sueldo… se registran solos en su fecha.','Añadir recurrente','recurring');
   } else {
     state.recurring.forEach(r=>{
-      const freqLabel = r.frequency==='cycle' ? `Cada ${r.cycleDays} días` : ({weekly:'Semanal', monthly:'Mensual', yearly:'Anual'}[r.frequency] || r.frequency);
+      const freqLabel = r.frequency==='cycle' ? `Cada ${r.cycleDays} días${r.autoCharge?' · automático':''}` : ({weekly:'Semanal', monthly:'Mensual', yearly:'Anual'}[r.frequency] || r.frequency);
       const div = document.createElement('div');
       div.className = 'account-card' + (r.active===false ? ' hidden-acct' : '');
 
@@ -3286,7 +3308,7 @@ function renderRecurringList(){
         <div>
           <div class="acct-name">${escapeHtml(r.note || (cat?cat.name:'Recurrente'))}${r.debtId && r.debtEffect==='loan' ? ' <span class="muted" style="font-weight:normal;">(préstamo nuevo)</span>' : ''}</div>
           <div class="acct-meta">${freqLabel} · ${cat?catIcon(cat)+' '+escapeHtml(cat.name):''} · ${acc?escapeHtml(acc.name):''}</div>
-          ${r.frequency==='cycle' && r.active!==false ? `<div class="acct-meta" style="margin-top:6px;">Próximo: <strong>${fmtDate(cycleNextDue(r))}</strong></div><div style="margin-top:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">${cycleActionsHtml(r)}</div>` : ''}
+          ${r.frequency==='cycle' && r.active!==false ? `<div class="acct-meta" style="margin-top:6px;">${r.autoCharge?'Próximo cobro automático':'Próximo'}: <strong>${fmtDate(cycleNextDue(r))}</strong></div><div style="margin-top:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">${cycleActionsHtml(r)}</div>` : ''}
         </div>
         <div class="acct-right">
           <div class="acct-balance ${r.kind}">${r.kind==='income'?'+':'-'}${fmtMoney(r.amount, acc?acc.currency:state.baseCurrency).replace('-','')}</div>
@@ -3301,7 +3323,8 @@ function renderRecurringList(){
             <div class="field"><label>Importe</label><input type="number" step="0.01" min="0" data-rec-edit-amount="${r.id}" value="${r.amount}"></div>
             <div class="field"><label>Categoría</label><select data-rec-edit-category="${r.id}">${sortedCategories(r.kind).map(c=>`<option value="${c.id}" ${c.id===r.categoryId?'selected':''}>${catIcon(c)} ${escapeHtml(c.name)}</option>`).join('')}</select></div>
             ${r.frequency==='cycle'
-              ? `<div class="field"><label>Cada cuántos días</label><input type="number" min="1" step="1" data-rec-edit-cycledays="${r.id}" value="${r.cycleDays}"></div>`
+              ? `<div class="field"><label>Cada cuántos días</label><input type="number" min="1" step="1" data-rec-edit-cycledays="${r.id}" value="${r.cycleDays}"></div>
+              <div class="field" style="grid-column:1/-1;"><label class="check-row"><input type="checkbox" data-rec-edit-auto="${r.id}" ${r.autoCharge?'checked':''}> Se cobra solo (débito automático)</label><span class="muted" style="font-size:12px;">Si la activas, se registran todos los cobros desde la fecha “Próximo” hasta hoy.</span></div>`
               : `<div class="field"><label>Frecuencia</label><select data-rec-edit-frequency="${r.id}">${['weekly','monthly','yearly'].map(f=>`<option value="${f}" ${f===r.frequency?'selected':''}>${({weekly:'Semanal',monthly:'Mensual',yearly:'Anual'})[f]}</option>`).join('')}</select></div>`}
             <div class="field"><label>Tipo con la deuda</label><select data-rec-edit-debtmode="${r.id}"><option value="payment" ${r.debtEffect!=='loan'?'selected':''}>Pago/abono</option><option value="loan" ${r.debtEffect==='loan'?'selected':''}>Préstamo nuevo (suma)</option></select></div>
             <div class="field"><label>Deuda relacionada</label><select data-rec-edit-debt="${r.id}"><option value="">Ninguna</option>${(r.debtEffect==='loan' ? debtsForLoanKind(r.kind) : debtsForKind(r.kind)).map(d=>`<option value="${d.id}" ${d.id===r.debtId?'selected':''}>${escapeHtml(d.person)} — ${fmtMoney(d.amount)}</option>`).join('')}</select></div>
@@ -3901,6 +3924,7 @@ function setupRecurring(){
   const syncCycleField = ()=>{
     const isCycle = document.getElementById('rec-frequency').value==='cycle';
     document.getElementById('rec-cycle-field').style.display = isCycle ? 'block' : 'none';
+    document.getElementById('rec-auto-field').style.display = isCycle ? 'block' : 'none';
   };
   document.getElementById('rec-frequency').addEventListener('change', syncCycleField);
   syncCycleField();
@@ -3994,7 +4018,7 @@ function setupRecurring(){
         categoryId: Number(document.getElementById('rec-category').value),
         subcategory: '',
         frequency: freqVal,
-        ...(freqVal==='cycle' ? {cycleDays, nextDue: startDate} : {}),
+        ...(freqVal==='cycle' ? {cycleDays, nextDue: startDate, autoCharge: document.getElementById('rec-auto').checked} : {}),
         startDate,
         lastGenerated: null,
         note: document.getElementById('rec-note').value.trim(),
@@ -4003,7 +4027,7 @@ function setupRecurring(){
         debtEffect: resolvedDebtId ? state.recDebtMode : null,
         active: true
       });
-      document.getElementById('rec-amount').value=''; document.getElementById('rec-note').value=''; document.getElementById('rec-person').value='';
+      document.getElementById('rec-auto').checked=false; document.getElementById('rec-amount').value=''; document.getElementById('rec-note').value=''; document.getElementById('rec-person').value='';
       document.getElementById('rec-debt-newperson').value=''; document.getElementById('rec-debt-newperson-field').style.display='none';
     }
 
@@ -4052,14 +4076,17 @@ function setupRecurring(){
       const cycleEl = document.querySelector(`[data-rec-edit-cycledays="${id}"]`);
       const frequency = freqEl ? freqEl.value : 'cycle';
       const cycleDays = cycleEl ? Math.round(Number(cycleEl.value)) : null;
+      const autoEl = document.querySelector(`[data-rec-edit-auto="${id}"]`);
       if(cycleEl && (!cycleDays || cycleDays<1)){ toast('Indica los días del ciclo'); return; }
       const note = document.querySelector(`[data-rec-edit-note="${id}"]`).value.trim();
       const person = document.querySelector(`[data-rec-edit-person="${id}"]`).value.trim();
       const debtIdVal = document.querySelector(`[data-rec-edit-debt="${id}"]`).value;
       const debtEffect = document.querySelector(`[data-rec-edit-debtmode="${id}"]`).value;
       if(!amount || amount<=0){ toast('Introduce un importe válido'); return; }
-      await idb.put('recurring', {...r, accountId, amount, categoryId, frequency, ...(cycleEl ? {cycleDays} : {}), note, person, debtId: debtIdVal ? Number(debtIdVal) : null, debtEffect: debtIdVal ? debtEffect : null});
-      await loadAll(); renderAll();
+      await idb.put('recurring', {...r, accountId, amount, categoryId, frequency, ...(cycleEl ? {cycleDays, autoCharge: !!(autoEl && autoEl.checked)} : {}), note, person, debtId: debtIdVal ? Number(debtIdVal) : null, debtEffect: debtIdVal ? debtEffect : null});
+      await loadAll();
+      if(cycleEl && autoEl && autoEl.checked){ await generateDueRecurring(); await loadAll(); }
+      renderAll();
       toast('Recurrente actualizado');
       return;
     }
