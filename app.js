@@ -161,6 +161,7 @@ let state = {
   recDebtMode:'payment',
   goals:[], recurring:[], reminders:[], debts:[], installments:[], shortcuts:[],
   lastBackupDate:null, backupReminderShown:false, editingTxId:null, editingTransferId:null, accentColor:'#A5842E', darkMode:false, textScale:100, iconPickerTarget:null, generalBudget:0,
+  finStartDay:12,
   resumenPeriod:{mode:'month', ref:todayISO()},
   movPeriod:{mode:'month', ref:todayISO()},
   movGroup:'date', selMode:false, sel:new Set(), collapsedCats:new Set(),
@@ -274,6 +275,8 @@ async function loadAll(){
   state.darkMode = darkSetting ? darkSetting.value : false;
   const scaleSetting = settings.find(s=>s.key==='textScale');
   state.textScale = scaleSetting ? scaleSetting.value : 100;
+  const finDaySetting = settings.find(s=>s.key==='finStartDay');
+  state.finStartDay = finDaySetting ? clampFinDay(finDaySetting.value) : 12;
   const resumenLayoutSetting = settings.find(s=>s.key==='resumenLayout');
   state.resumenLayout = resumenLayoutSetting ? resumenLayoutSetting.value : defaultResumenLayout();
   state.goals = goals;
@@ -932,7 +935,16 @@ function startOfYear(d){ return new Date(d.getFullYear(), 0, 1); }
 function endOfYear(d){ return new Date(d.getFullYear(), 11, 31, 23,59,59,999); }
 function toISO(d){ return localISO(d); }
 
+/* Mes financiero: empieza el día finStartDay (ej. 12) y termina el día anterior del mes siguiente (11) */
+function clampFinDay(v){ v = Math.round(Number(v)); return (v>=1 && v<=28) ? v : 12; }
+function finMonthRange(refISO){
+  const ref = new Date(refISO + "T00:00:00"), sd = clampFinDay(state.finStartDay);
+  let y = ref.getFullYear(), m = ref.getMonth();
+  if(ref.getDate() < sd) m--;
+  return {start: toISO(new Date(y, m, sd)), end: toISO(new Date(y, m+1, sd-1))};
+}
 function periodRange(period){
+  if(period.mode === 'fmonth') return finMonthRange(period.ref);
   if(period.mode === 'range'){
     return {start: period.start || todayISO(), end: period.end || todayISO()};
   }
@@ -946,6 +958,7 @@ function periodRange(period){
 }
 function periodLabel(period){
   if(period.mode==='range') return period.start + ' – ' + period.end;
+  if(period.mode==='fmonth'){ const r = finMonthRange(period.ref); const f = x=>new Date(x+'T00:00:00').toLocaleDateString('es-ES',{day:'2-digit',month:'short'}); return f(r.start)+' – '+f(r.end)+' '+r.end.slice(0,4); }
   const ref = new Date(period.ref + "T00:00:00");
   if(period.mode==='day') return cap(ref.toLocaleDateString('es-ES',{weekday:'short', day:'2-digit', month:'short', year:'numeric'}));
   if(period.mode==='week'){ const s=startOfWeek(ref), e=endOfWeek(ref); return s.toLocaleDateString('es-ES',{day:'2-digit',month:'short'}) + ' – ' + e.toLocaleDateString('es-ES',{day:'2-digit',month:'short'}); }
@@ -958,6 +971,7 @@ function navigatePeriod(period, dir){
   if(period.mode==='day') ref.setDate(ref.getDate()+dir);
   else if(period.mode==='week') ref.setDate(ref.getDate()+7*dir);
   else if(period.mode==='month') ref.setMonth(ref.getMonth()+dir);
+  else if(period.mode==='fmonth'){ const st = new Date(finMonthRange(period.ref).start+'T00:00:00'); st.setMonth(st.getMonth()+dir); return {...period, ref: toISO(st)}; }
   else ref.setFullYear(ref.getFullYear()+dir);
   return {...period, ref: toISO(ref)};
 }
@@ -1054,6 +1068,7 @@ function renderResumen(){
 
   if(document.getElementById('resumen-period')){
     renderPeriodBar('resumen-period', 'resumenPeriod', renderResumen);
+    renderFinMonthRow();
     const range = periodRange(state.resumenPeriod);
     const periodTx = txInRange(state.transactions, range.start, range.end);
     let income=0, expense=0, incomeCount=0, expenseCount=0;
@@ -1075,21 +1090,26 @@ function renderResumen(){
     renderIncomeSplit(periodTx, income, expense);
 
     const compareEl = document.getElementById('stat-compare');
-    if(state.resumenPeriod.mode === 'month'){
+    if(state.resumenPeriod.mode === 'month' || state.resumenPeriod.mode === 'fmonth'){
+      const isFin = state.resumenPeriod.mode === 'fmonth';
       const ref = new Date(state.resumenPeriod.ref + "T00:00:00");
       const prevRef = new Date(ref.getFullYear(), ref.getMonth()-1, 1);
-      const pStart = toISO(startOfMonth(prevRef)), pEnd = toISO(endOfMonth(prevRef));
+      const prevFin = isFin ? finMonthRange(navigatePeriod(state.resumenPeriod, -1).ref) : null;
+      const pStart = isFin ? prevFin.start : toISO(startOfMonth(prevRef)), pEnd = isFin ? prevFin.end : toISO(endOfMonth(prevRef));
       const prevExpenses = txInRange(state.transactions, pStart, pEnd).filter(t=>t.kind==='expense')
         .reduce((s,t)=>{ const acc=getAccount(t.accountId); return s + toBase(t.amount, acc?acc.currency:state.baseCurrency); }, 0);
       if(prevExpenses > 0){
         const diffPct = ((expense - prevExpenses) / prevExpenses) * 100;
         const arrow = diffPct > 0 ? '▲' : (diffPct < 0 ? '▼' : '·');
-        compareEl.textContent = `${arrow} ${Math.abs(diffPct).toFixed(0)}% en gastos vs mes anterior`;
+        compareEl.textContent = `${arrow} ${Math.abs(diffPct).toFixed(0)}% en gastos vs ${isFin?'mes financiero anterior':'mes anterior'}`;
         compareEl.style.color = diffPct > 0 ? 'var(--over)' : 'var(--teal)';
+        if(isFin){ delete compareEl.dataset.detail; compareEl.style.cursor = ''; compareEl.style.textDecoration = ''; }
+        else {
         compareEl.dataset.detail = 'cmp';
         compareEl.style.cursor = 'pointer';
         compareEl.style.textDecoration = 'underline dotted var(--rule-strong)';
         compareEl.style.textUnderlineOffset = '4px';
+        }
       } else {
         compareEl.textContent = '';
         delete compareEl.dataset.detail;
@@ -1315,6 +1335,27 @@ async function postponeCycle(id, dateISO){
 function cycleActionsHtml(r){
   return `${r.autoCharge ? '' : `<button type="button" class="btn-secondary btn-sm" data-cycle-pay="${r.id}">Registrar</button>`}
     <label class="date-cal-btn" title="${r.autoCharge?'Cambiar la fecha del próximo cobro':'Posponer / cambiar fecha'}" style="margin-left:0; display:inline-flex; vertical-align:middle;"><span>📅 ${r.autoCharge?'Cambiar fecha':'Posponer'}</span><input type="date" data-cycle-postpone="${r.id}" value="${cycleNextDue(r)}"></label>`;
+}
+/* Selector "Mes / Mes financiero" bajo la barra de periodo del Resumen (solo cuando el periodo es un mes) */
+function renderFinMonthRow(){
+  const bar = document.getElementById('resumen-period');
+  const mode = state.resumenPeriod.mode;
+  if(!bar || (mode!=='month' && mode!=='fmonth')) return;
+  const row = document.createElement('div');
+  row.className = 'fin-row';
+  row.innerHTML = `<div class="period-modes"><button type="button" class="pm-btn ${mode==='month'?'active':''}" data-fin="month">Mes</button><button type="button" class="pm-btn ${mode==='fmonth'?'active':''}" data-fin="fmonth">Mes financiero</button></div>`
+    + (mode==='fmonth' ? `<label class="fin-day">Empieza el día <input type="number" id="fin-start-day" min="1" max="28" step="1" value="${clampFinDay(state.finStartDay)}" inputmode="numeric"></label>` : '');
+  bar.appendChild(row);
+  row.querySelectorAll('[data-fin]').forEach(b=> b.addEventListener('click', ()=>{
+    state.resumenPeriod = {...state.resumenPeriod, mode:b.dataset.fin};
+    renderResumen();
+  }));
+  const di = row.querySelector('#fin-start-day');
+  if(di) di.addEventListener('change', async ()=>{
+    state.finStartDay = clampFinDay(di.value);
+    await idb.put('settings', {key:'finStartDay', value:state.finStartDay});
+    renderResumen();
+  });
 }
 /* Reparto del ingreso: prioritarios (fijos: recurrentes y cuotas) / variables / lo que sobra */
 function isFixedTx(t){ return t.source==='recurring' || t.source==='installment'; }
