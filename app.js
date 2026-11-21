@@ -786,9 +786,10 @@ function accountBalance(accId){
   });
   return bal;
 }
-function totalBalanceBase(includeHidden){
+function totalBalanceBase(includeHidden, byCountry){
   return state.accounts.reduce((sum,a)=>{
     if(!includeHidden && a.visible===false) return sum;
+    if(byCountry && !accPassesCountry(a.id)) return sum;
     return sum + toBase(accountBalance(a.id), a.currency);
   }, 0);
 }
@@ -806,9 +807,10 @@ function accountBalanceAsOf(accId, asOfDate){
   });
   return bal;
 }
-function totalBalanceBaseAsOf(asOfDate, includeHidden){
+function totalBalanceBaseAsOf(asOfDate, includeHidden, byCountry){
   return state.accounts.reduce((sum,a)=>{
     if(!includeHidden && a.visible===false) return sum;
+    if(byCountry && !accPassesCountry(a.id)) return sum;
     return sum + toBase(accountBalanceAsOf(a.id, asOfDate), a.currency);
   }, 0);
 }
@@ -842,9 +844,9 @@ function computeBalanceTrend(days){
     const d = new Date(today);
     d.setDate(d.getDate()-i);
     const iso = toISO(d);
-    points.push({date: iso, v: totalBalanceBaseAsOf(iso)});
+    points.push({date: iso, v: totalBalanceBaseAsOf(iso, false, true)});
   }
-  if(((days-1) % step) !== 0) points.push({date: todayISO(), v: totalBalanceBaseAsOf(todayISO())});
+  if(((days-1) % step) !== 0) points.push({date: todayISO(), v: totalBalanceBaseAsOf(todayISO(), false, true)});
   return points;
 }
 let trendModel = null;
@@ -1048,14 +1050,20 @@ function renderResumen(){
 
   const balEl = document.getElementById('stat-balance');
   if(balEl){
-    const bal = totalBalanceBase(false);
+    const bal = totalBalanceBase(false, true);
     balEl.textContent = fmtMoney(bal);
     balEl.classList.toggle('neg', bal<0);
-    document.getElementById('balance-sub').textContent = 'En ' + (CURRENCY_META[state.baseCurrency]?.name || state.baseCurrency);
+    const fLab = countryFilterLabel();
+    let balSub = (fLab ? `Cuentas de ${fLab} · ` : '') + 'En ' + (CURRENCY_META[state.baseCurrency]?.name || state.baseCurrency);
+    if(fLab && activeCountryFilter()!==COUNTRY_NONE){
+      const cur = countryCurrency(fLab);
+      if(cur!==state.baseCurrency) balSub += ` · ≈ ${fmtMoney(convertAmount(bal, state.baseCurrency, cur), cur)}`;
+    }
+    document.getElementById('balance-sub').textContent = balSub;
     renderBalanceTrend();
     const miniEl = document.getElementById('accounts-mini');
     miniEl.innerHTML = '';
-    sortedAccounts().filter(a => includeHidden || a.visible !== false).forEach(a=>{
+    sortedAccounts().filter(a => (includeHidden || a.visible !== false) && accPassesCountry(a.id)).forEach(a=>{
       const row = document.createElement('div');
       row.className = 'acct-mini-row';
       row.dataset.detail = 'acct'; row.dataset.detailId = a.id; row.style.cursor = 'pointer';
@@ -1128,13 +1136,10 @@ function renderResumen(){
         const arrow = diffPct > 0 ? '▲' : (diffPct < 0 ? '▼' : '·');
         compareEl.textContent = `${arrow} ${Math.abs(diffPct).toFixed(0)}% en gastos vs ${isFin?'mes financiero anterior':'mes anterior'}`;
         compareEl.style.color = diffPct > 0 ? 'var(--over)' : 'var(--teal)';
-        if(isFin){ delete compareEl.dataset.detail; compareEl.style.cursor = ''; compareEl.style.textDecoration = ''; }
-        else {
         compareEl.dataset.detail = 'cmp';
         compareEl.style.cursor = 'pointer';
         compareEl.style.textDecoration = 'underline dotted var(--rule-strong)';
         compareEl.style.textUnderlineOffset = '4px';
-        }
       } else {
         compareEl.textContent = '';
         delete compareEl.dataset.detail;
@@ -1868,7 +1873,9 @@ function computeBarsBuckets(key){
   const buckets = [];
   const mk = (id, label, from, to)=> buckets.push({id, label, from, to, inc:0, exp:0});
   if(key==='month' || key==='30'){
-    const n = key==='month' ? today.getDate() : 30;
+    const n = key==='month'
+      ? (state.useFinMonth ? Math.max(1, Math.round((today - new Date(currentMonthRange().start+'T00:00:00'))/86400000) + 1) : today.getDate())
+      : 30;
     for(let i=n-1;i>=0;i--){
       const d = new Date(today); d.setDate(d.getDate()-i); const iso = toISO(d);
       mk(iso, new Date(iso+'T00:00:00').toLocaleDateString('es-ES',{weekday:'short', day:'numeric', month:'short'}), iso, iso);
@@ -1880,18 +1887,34 @@ function computeBarsBuckets(key){
       const f = new Date(firstActivityDate()+'T00:00:00');
       n = Math.max(1, (today.getFullYear()-f.getFullYear())*12 + today.getMonth()-f.getMonth() + 1);
     }
-    for(let i=n-1;i>=0;i--){
-      const d = new Date(today.getFullYear(), today.getMonth()-i, 1);
-      const ym = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');
-      mk(ym, cap(d.toLocaleDateString('es-ES',{month:'long', year:'numeric'})), ym+'-01', ym+'-31');
+    if(state.useFinMonth){
+      // meses financieros: del día de inicio al día anterior del mes siguiente
+      const cur = new Date(currentMonthRange().start+'T00:00:00');
+      if(key==='all'){
+        const f = finMonthRange(firstActivityDate()).start;
+        n = Math.max(1, (cur.getFullYear()-new Date(f+'T00:00:00').getFullYear())*12 + cur.getMonth()-new Date(f+'T00:00:00').getMonth() + 1);
+      }
+      const sh = x=>new Date(x+'T00:00:00').toLocaleDateString('es-ES',{day:'numeric',month:'short'});
+      for(let i=n-1;i>=0;i--){
+        const r = finMonthRange(toISO(new Date(cur.getFullYear(), cur.getMonth()-i, cur.getDate())));
+        mk(r.start, `${sh(r.start)} – ${sh(r.end)} ${r.end.slice(0,4)}`, r.start, r.end);
+      }
+    } else {
+      for(let i=n-1;i>=0;i--){
+        const d = new Date(today.getFullYear(), today.getMonth()-i, 1);
+        const ym = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');
+        mk(ym, cap(d.toLocaleDateString('es-ES',{month:'long', year:'numeric'})), ym+'-01', ym+'-31');
+      }
     }
     buckets.mode = 'month';
   }
   const idx = {}; buckets.forEach((b,i)=> idx[b.id]=i);
-  state.transactions.forEach(t=>{
+  countryTx(state.transactions).forEach(t=>{
     if(t.kind!=='income' && t.kind!=='expense') return;
-    const id = buckets.mode==='day' ? t.date : (t.date||'').slice(0,7);
-    const i = idx[id]; if(i===undefined) return;
+    let i;
+    if(buckets.mode==='month' && state.useFinMonth) i = buckets.findIndex(b=> t.date>=b.from && t.date<=b.to);
+    else i = idx[buckets.mode==='day' ? t.date : (t.date||'').slice(0,7)];
+    if(i===undefined || i<0) return;
     const acc = getAccount(t.accountId);
     const v = toBase(t.amount, acc?acc.currency:state.baseCurrency);
     if(t.kind==='income') buckets[i].inc += v; else buckets[i].exp += v;
@@ -1909,7 +1932,8 @@ function renderBarsLegend(sel){
   const src = sel!=null ? [barsModel.buckets[sel]] : barsModel.buckets;
   const inc = src.reduce((s,b)=>s+b.inc,0), exp = src.reduce((s,b)=>s+b.exp,0);
   const chip = (c,name,val)=>`<span class="nw-chip static"><span class="nw-dot" style="background:${c}"></span><span class="nw-name">${name}</span><span class="nw-val">${fmtMoney(val)}</span></span>`;
-  el.innerHTML = chip('var(--teal)','Ingresos',inc) + chip('var(--over)','Gastos',exp) + chip('var(--gold)','Neto',inc-exp);
+  el.innerHTML = chip('var(--teal)','Ingresos',inc) + chip('var(--over)','Gastos',exp) + chip('var(--gold)','Neto',inc-exp)
+  const bl = countryFilterLabel(); if(bl) el.insertAdjacentHTML('beforeend', `<span class="stat-sub">Solo ${escapeHtml(bl)}</span>`);
 }
 function renderBarsChart(){
   const svg = document.getElementById('bars-chart'); if(!svg) return;
@@ -2287,10 +2311,12 @@ function detail_nwx(req, d){
 }
 
 function detail_compare(req, d){
-  const ref = new Date(state.resumenPeriod.ref+'T00:00:00');
-  const prevRef = new Date(ref.getFullYear(), ref.getMonth()-1, 1);
+  const isFin = state.resumenPeriod.mode === 'fmonth';
+  const curR = periodRange(state.resumenPeriod);
+  const prevP = navigatePeriod(state.resumenPeriod, -1);
+  const prevR = periodRange(prevP);
   const tot = (r)=>{
-    const items = txInRange(countryTx(state.transactions), toISO(startOfMonth(r)), toISO(endOfMonth(r)));
+    const items = txInRange(countryTx(state.transactions), r.start, r.end);
     const byCat = {}; let inc=0, exp=0;
     items.forEach(t=>{
       const v = sumBase([t]);
@@ -2299,10 +2325,12 @@ function detail_compare(req, d){
     });
     return {inc, exp, byCat};
   };
-  const A = tot(ref), B = tot(prevRef);
-  const nameOf = r => cap(r.toLocaleDateString('es-ES',{month:'long', year:'numeric'}));
-  d.title = '📊 Mes vs mes anterior';
-  d.summary = `${nameOf(ref)} <span class="muted">frente a</span> ${nameOf(prevRef)}`;
+  const A = tot(curR), B = tot(prevR);
+  const short = x=>new Date(x+'T00:00:00').toLocaleDateString('es-ES',{day:'numeric',month:'short'});
+  const nameOf = r => isFin ? `${short(r.start)} – ${short(r.end)}` : cap(new Date(r.start+'T00:00:00').toLocaleDateString('es-ES',{month:'long', year:'numeric'}));
+  const headOf = r => isFin ? short(r.start) : cap(new Date(r.start+'T00:00:00').toLocaleDateString('es-ES',{month:'short'}));
+  d.title = isFin ? '📊 Mes financiero vs anterior' : '📊 Mes vs mes anterior';
+  d.summary = `${nameOf(curR)} <span class="muted">frente a</span> ${nameOf(prevR)}`;
   const delta = (a,b,goodWhenLower)=>{
     const diff = a-b;
     if(Math.abs(diff)<0.005) return '<span class="muted">·</span>';
@@ -2313,7 +2341,7 @@ function detail_compare(req, d){
   const ids = [...new Set([...Object.keys(A.byCat), ...Object.keys(B.byCat)])]
     .sort((x,y)=> Math.max(B.byCat[y]||0, A.byCat[y]||0) - Math.max(B.byCat[x]||0, A.byCat[x]||0));
   d.html = `<div class="cmp-table">
-    <div class="cmp-row cmp-head"><span class="cmp-name"></span><span class="cmp-val">${cap(ref.toLocaleDateString('es-ES',{month:'short'}))}</span><span class="cmp-val">${cap(prevRef.toLocaleDateString('es-ES',{month:'short'}))}</span><span class="cmp-delta">Dif.</span></div>
+    <div class="cmp-row cmp-head"><span class="cmp-name"></span><span class="cmp-val">${headOf(curR)}</span><span class="cmp-val">${headOf(prevR)}</span><span class="cmp-delta">Dif.</span></div>
     ${row('Ingresos', A.inc, B.inc, false, true)}
     ${row('Gastos', A.exp, B.exp, true, true)}
     ${row('Neto', A.inc-A.exp, B.inc-B.exp, false, true)}
@@ -2956,12 +2984,14 @@ function renderCuentas(){
     el.innerHTML = emptyState('🏦','Sin cuentas todavía','Crea tu primera cuenta (efectivo, banco, tarjeta…) con el formulario de abajo.','Crear cuenta','focus-account');
   } else {
     const sortMode = document.getElementById('account-sort').value;
-    let accountsSorted = state.accounts.slice();
+    let accountsSorted = state.accounts.filter(a=>accPassesCountry(a.id));
+    const cNote = countryFilterLabel();
+    if(cNote) el.insertAdjacentHTML('beforeend', `<div class="stat-sub" style="margin-bottom:10px;">Mostrando solo las cuentas de ${escapeHtml(cNote)}. Cambia el país en Resumen para ver otras.</div>`);
     if(sortMode==='balance-desc') accountsSorted.sort((a,b)=> toBase(accountBalance(b.id),b.currency) - toBase(accountBalance(a.id),a.currency));
     else if(sortMode==='balance-asc') accountsSorted.sort((a,b)=> toBase(accountBalance(a.id),a.currency) - toBase(accountBalance(b.id),b.currency));
     else if(sortMode==='name') accountsSorted.sort((a,b)=> a.name.localeCompare(b.name));
     else accountsSorted.sort((a,b)=> (a.order??a.id) - (b.order??b.id));
-    const showReorder = sortMode==='default';
+    const showReorder = sortMode==='default' && !activeCountryFilter();
     const typeLabels = {efectivo:'Efectivo', banco:'Banco', ahorros:'Ahorros', tarjeta_credito:'Tarjeta de crédito', otro:'Otro'};
     accountsSorted.forEach((a,idx)=>{
       const div = document.createElement('div');
@@ -3157,6 +3187,12 @@ function getReportKey(){
 }
 function reportRange(key){
   const t = todayISO(), T = new Date(t+'T00:00:00'), y = T.getFullYear(), m = T.getMonth();
+  if(key==='month' && state.useFinMonth){
+    const cur = finMonthRange(t), prev = finMonthRange(addDaysISO(cur.start, -1));
+    const elapsed = Math.round((T - new Date(cur.start+'T00:00:00'))/86400000);
+    const pe = addDaysISO(prev.start, elapsed);
+    return {start:cur.start, end:t, prevStart:prev.start, prevEnd: pe > prev.end ? prev.end : pe, gran:'day', phrase:'el mes financiero anterior'};
+  }
   if(key==='month'){
     const prevLast = new Date(y, m, 0).getDate();
     return {start:toISO(new Date(y,m,1)), end:t, prevStart:toISO(new Date(y,m-1,1)), prevEnd:toISO(new Date(y,m-1,Math.min(T.getDate(),prevLast))), gran:'day', phrase:'el mes anterior'};
@@ -3196,7 +3232,7 @@ function computeReport(key, type, catId){
   const r = reportRange(key);
   const sums = (from, to)=>{
     const o = {inc:0, exp:0, byCat:{}};
-    state.transactions.forEach(t=>{
+    countryTx(state.transactions).forEach(t=>{
       if(t.date<from || t.date>to) return;
       if(t.kind!=='income' && t.kind!=='expense') return;
       const v = sumBase([t]);
@@ -3209,7 +3245,7 @@ function computeReport(key, type, catId){
   const prev = r.prevStart ? sums(r.prevStart, r.prevEnd) : null;
   const B = reportBuckets(r);
   const catSeries = {};
-  state.transactions.forEach(t=>{
+  countryTx(state.transactions).forEach(t=>{
     if(t.date<r.start || t.date>r.end || t.kind!==type) return;
     const i = B.idx.get(reportBucketOf(r.gran, t.date)); if(i==null) return;
     const v = sumBase([t]);
@@ -3235,6 +3271,8 @@ function renderReport(){
   const m = computeReport(key, type, state.rpCat);
   reportModel = m; state.rpSel = null;
   const {r, cur, prev, buckets} = m;
+  const rpn = document.getElementById('rp-country-note');
+  if(rpn){ const lab = countryFilterLabel(); rpn.style.display = lab ? 'block' : 'none'; rpn.textContent = lab ? `Solo cuentas de ${lab}.` : ''; }
   document.getElementById('rp-chips').innerHTML = REPORT_OPTIONS.map(o=>`<button type="button" class="date-chip${o.key===key?' active':''}" data-rp-key="${o.key}">${o.label}</button>`).join('');
   document.getElementById('rp-type').innerHTML = [['expense','Gastos'],['income','Ingresos']].map(([k,l])=>`<button type="button" class="date-chip${k===type?' active':''}" data-rp-type="${k}">${l}</button>`).join('')
     + (state.rpCat ? `<button type="button" class="date-chip active" data-rp-cat-clear="1">${catIcon(getCategory(state.rpCat))} ${escapeHtml(getCategory(state.rpCat).name)} ✕</button>` : '');
