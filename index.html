@@ -50,6 +50,7 @@
         <div class="page-title">Resumen</div>
       </div>
       <div class="fin-row fin-top" id="fin-selector"></div>
+      <div class="fin-row fin-top" id="country-selector" style="display:none;"></div>
 
       <div id="shortcuts-row" style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:20px;"></div>
 
@@ -234,6 +235,7 @@
       <div class="card">
         <div class="section-title">Progreso de este mes</div>
         <div class="card-cash-line" id="presupuestos-card-cash" style="display:none; margin-bottom:12px;"></div>
+        <div class="stat-sub" id="presupuestos-country-note" style="display:none; margin-bottom:10px;"></div>
         <div id="presupuestos-progress"></div>
       </div>
 
@@ -342,6 +344,10 @@
         <div class="settings-row">
           <div><div class="settings-label">Moneda base</div><div class="settings-desc">La usada para el saldo total y los presupuestos</div></div>
           <select id="base-currency-select"></select>
+        </div>
+        <div class="settings-row">
+          <div><div class="settings-label">País donde resides</div><div class="settings-desc">Se propone al crear cuentas y se usa para asignarlo a las que no tienen país</div></div>
+          <input type="text" id="default-country-input" placeholder="Ej. España" style="max-width:160px;">
         </div>
         <div class="settings-row">
           <div><div class="settings-label">Modo oscuro</div><div class="settings-desc">Tonos oscuros para usar de noche</div></div>

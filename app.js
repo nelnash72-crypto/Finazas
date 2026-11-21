@@ -161,7 +161,7 @@ let state = {
   recDebtMode:'payment',
   goals:[], recurring:[], reminders:[], debts:[], installments:[], shortcuts:[],
   lastBackupDate:null, backupReminderShown:false, editingTxId:null, editingTransferId:null, accentColor:'#A5842E', darkMode:false, textScale:100, iconPickerTarget:null, generalBudget:0,
-  finStartDay:12, useFinMonth:false,
+  finStartDay:12, useFinMonth:false, defaultCountry:'España', countryFilter:'',
   resumenPeriod:{mode:'month', ref:todayISO()},
   movPeriod:{mode:'month', ref:todayISO()},
   movGroup:'date', selMode:false, sel:new Set(), collapsedCats:new Set(),
@@ -277,6 +277,10 @@ async function loadAll(){
   state.textScale = scaleSetting ? scaleSetting.value : 100;
   const finDaySetting = settings.find(s=>s.key==='finStartDay');
   state.finStartDay = finDaySetting ? clampFinDay(finDaySetting.value) : 12;
+  const defCountrySetting = settings.find(s=>s.key==='defaultCountry');
+  state.defaultCountry = defCountrySetting ? String(defCountrySetting.value||'') : 'España';
+  const cfSetting = settings.find(s=>s.key==='countryFilter');
+  state.countryFilter = cfSetting ? String(cfSetting.value||'') : '';
   const finModeSetting = settings.find(s=>s.key==='useFinMonth');
   state.useFinMonth = !!(finModeSetting && finModeSetting.value);
   syncFinModes();
@@ -707,7 +711,7 @@ function cardCashView(start, end){
     map[k].total += amt;
   };
   state.transactions.forEach(t=>{
-    const info = cardPayInfo(t); if(!info) return;
+    const info = cardPayInfo(t); if(!info || !accPassesCountry(info.acc.id)) return;
     const amt = toBase(t.amount, info.acc.currency);
     const inRange = t.date>=start && t.date<=end;
     const payInRange = info.pay>=start && info.pay<=end;
@@ -1066,7 +1070,7 @@ function renderResumen(){
   renderCashflow();
 
   const {start:mStart, end:mEnd} = currentMonthRange();
-  const monthExpenses = txInRange(state.transactions, mStart, mEnd).filter(t=>t.kind==='expense');
+  const monthExpenses = txInRange(countryTx(state.transactions), mStart, mEnd).filter(t=>t.kind==='expense');
 
   if(document.getElementById('resumen-general-budget')){
     renderGeneralBudget(monthExpenses, 'resumen-general-budget', computeMonthFixedProjection(mStart, mEnd));
@@ -1091,7 +1095,7 @@ function renderResumen(){
   if(document.getElementById('resumen-period')){
     renderPeriodBar('resumen-period', 'resumenPeriod', renderResumen);
     const range = periodRange(state.resumenPeriod);
-    const periodTx = txInRange(state.transactions, range.start, range.end);
+    const periodTx = txInRange(countryTx(state.transactions), range.start, range.end);
     let income=0, expense=0, incomeCount=0, expenseCount=0;
     const catSpend = {};
     periodTx.forEach(t=>{
@@ -1117,7 +1121,7 @@ function renderResumen(){
       const prevRef = new Date(ref.getFullYear(), ref.getMonth()-1, 1);
       const prevFin = isFin ? finMonthRange(navigatePeriod(state.resumenPeriod, -1).ref) : null;
       const pStart = isFin ? prevFin.start : toISO(startOfMonth(prevRef)), pEnd = isFin ? prevFin.end : toISO(endOfMonth(prevRef));
-      const prevExpenses = txInRange(state.transactions, pStart, pEnd).filter(t=>t.kind==='expense')
+      const prevExpenses = txInRange(countryTx(state.transactions), pStart, pEnd).filter(t=>t.kind==='expense')
         .reduce((s,t)=>{ const acc=getAccount(t.accountId); return s + toBase(t.amount, acc?acc.currency:state.baseCurrency); }, 0);
       if(prevExpenses > 0){
         const diffPct = ((expense - prevExpenses) / prevExpenses) * 100;
@@ -1145,7 +1149,7 @@ function renderResumen(){
 
   const recentEl = document.getElementById('resumen-recent');
   if(recentEl){
-    const recentItems = mergedLedger().slice(0,6);
+    const recentItems = mergedLedger(true).slice(0,6);
     if(recentItems.length===0){
       recentEl.innerHTML = state.accounts.length===0 ? emptyState('🏦','Empieza creando una cuenta','Una cuenta puede ser efectivo, un banco o una tarjeta. Luego podrás registrar movimientos.','Crear cuenta','goto-cuentas') : emptyState('📝','Aún no hay movimientos','Registra tu primer gasto o ingreso; solo toma unos segundos.','Añadir movimiento','add-tx');
     } else {
@@ -1359,7 +1363,32 @@ function cycleActionsHtml(r){
     <label class="date-cal-btn" title="${r.autoCharge?'Cambiar la fecha del próximo cobro':'Posponer / cambiar fecha'}" style="margin-left:0; display:inline-flex; vertical-align:middle;"><span>📅 ${r.autoCharge?'Cambiar fecha':'Posponer'}</span><input type="date" data-cycle-postpone="${r.id}" value="${cycleNextDue(r)}"></label>`;
 }
 /* Selector "Mes / Mes financiero": justo bajo el título del Resumen, siempre visible */
+function renderCountryRow(){
+  const row = document.getElementById('country-selector');
+  if(!row) return;
+  const {countries, hasNone} = countryOptions();
+  if(countries.length + (hasNone?1:0) < 2){ row.style.display = 'none'; row.innerHTML = ''; return; }
+  row.style.display = '';
+  const f = activeCountryFilter();
+  const chip = (val, label)=>`<button type="button" class="pm-btn ${f===val?'active':''}" data-country="${escapeHtml(val)}">${escapeHtml(label)}</button>`;
+  let extra = '';
+  if(f && f!==COUNTRY_NONE){
+    const cur = countryCurrency(countryFilterLabel());
+    if(cur!==state.baseCurrency){
+      const range = periodRange(state.resumenPeriod);
+      const tx = txInRange(countryTx(state.transactions), range.start, range.end);
+      const t = cashflowTotals(tx.map(x=>({amount:x.amount, currency:(getAccount(x.accountId)||{}).currency||state.baseCurrency, kind:x.kind})), cur);
+      extra = `<span class="fin-range">En ${cur}: gastos ${fmtMoney(t.exp, cur)} · ingresos ${fmtMoney(t.inc, cur)}</span>`;
+    }
+  }
+  row.innerHTML = `<span class="fin-label">País</span><div class="period-modes">${chip('', 'Todos')}${countries.map(c=>chip(countryKey(c), c)).join('')}${hasNone?chip(COUNTRY_NONE, 'Sin país'):''}</div>${extra}`;
+  row.querySelectorAll('[data-country]').forEach(b=> b.addEventListener('click', async ()=>{
+    await setCountryFilter(b.dataset.country);
+    renderAll();
+  }));
+}
 function renderFinMonthRow(){
+  renderCountryRow();
   const row = document.getElementById('fin-selector');
   if(!row) return;
   const fin = !!state.useFinMonth;
@@ -1463,7 +1492,7 @@ function projectRecurringOccurrences(r, fromDate, toDate){
     if(next < fromDate) next = fromDate;   // vencido: se espera hoy
     let it = 0;
     while(next && next <= toDate && it < 60){
-      out.push({date:next, label:(r.note || getCategory(r.categoryId)?.name || 'Recurrente'), amount:r.amount, currency: getAccount(r.accountId)?.currency||state.baseCurrency, kind:r.kind});
+      out.push({date:next, label:(r.note || getCategory(r.categoryId)?.name || 'Recurrente'), amount:r.amount, currency: getAccount(r.accountId)?.currency||state.baseCurrency, kind:r.kind, accountId:r.accountId});
       next = addDaysISO(next, days); it++;
     }
     return out;
@@ -1474,9 +1503,9 @@ function projectRecurringOccurrences(r, fromDate, toDate){
     if(next >= fromDate){
       if(r.isTransfer){
         const fromAcc = getAccount(r.fromAccountId);
-        out.push({date:next, label:'⇄ '+(r.note||'Transferencia recurrente'), amount:r.fromAmount, currency: fromAcc?fromAcc.currency:state.baseCurrency, kind:'transfer'});
+        out.push({date:next, label:'⇄ '+(r.note||'Transferencia recurrente'), amount:r.fromAmount, currency: fromAcc?fromAcc.currency:state.baseCurrency, kind:'transfer', accountId:r.fromAccountId});
       } else {
-        out.push({date:next, label:(r.note || getCategory(r.categoryId)?.name || 'Recurrente'), amount:r.amount, currency: getAccount(r.accountId)?.currency||state.baseCurrency, kind:r.kind});
+        out.push({date:next, label:(r.note || getCategory(r.categoryId)?.name || 'Recurrente'), amount:r.amount, currency: getAccount(r.accountId)?.currency||state.baseCurrency, kind:r.kind, accountId:r.accountId});
       }
     }
     next = nextRecurringDate(next, r.frequency);
@@ -1492,7 +1521,7 @@ function projectInstallmentOccurrences(it, fromDate, toDate){
   let iterations = 0;
   while(next && next <= toDate && paid < it.totalInstallments && iterations < 60){
     if(next >= fromDate){
-      out.push({date:next, label:`${it.name} · Cuota ${paid+1}/${it.totalInstallments}`, amount:installmentAmountFor(it, paid), currency: getAccount(it.accountId)?.currency||state.baseCurrency, kind:'expense'});
+      out.push({date:next, label:`${it.name} · Cuota ${paid+1}/${it.totalInstallments}`, amount:installmentAmountFor(it, paid), currency: getAccount(it.accountId)?.currency||state.baseCurrency, kind:'expense', accountId:it.accountId});
     }
     paid++;
     next = installmentAfter(it, next, paid);
@@ -1519,7 +1548,7 @@ function projectCardPaymentOccurrences(a, fromDate, toDate, cardCharges){
       const label = '💳 ' + a.name + (a.autopayAccountId ? ' (pago automático)' : ' (pendiente de pagar)');
       const names = inCycle.map(c=> c.label);
       const detail = names.length ? 'Incluye cargos previstos: ' + names.slice(0,4).join(', ') + (names.length>4 ? ` y ${names.length-4} más` : '') : '';
-      out.push({date:paymentDate, label, amount, currency:a.currency, kind:'expense', detail});
+      out.push({date:paymentDate, label, amount, currency:a.currency, kind:'expense', detail, accountId:a.id});
     }
     prevCutoff = cutoff;
     cutoff = nextMonthlyOnDay(cutoff, cutoffDay);
@@ -1578,6 +1607,92 @@ function computeCashflowProjection(range){
   items.sort((x,y)=> x.date.localeCompare(y.date));
   return items;
 }
+/* País de una cuenta: texto libre; mismo país = mismo texto sin importar mayúsculas/espacios. Sin país = vacío. */
+function accountCountry(accountId){
+  const a = getAccount(accountId);
+  const c = a && a.country ? String(a.country).trim() : '';
+  return c;
+}
+function countryKey(c){ return c ? c.toLowerCase() : ''; }
+/* ===== Filtro de país (global): '' = Todos, '__none__' = Sin país, o la clave (minúsculas) de un país ===== */
+const COUNTRY_NONE = '__none__';
+function countryOptions(){
+  const list = []; let hasNone = false;
+  state.accounts.forEach(a=>{
+    const c = (a.country||'').trim();
+    if(!c) hasNone = true;
+    else if(!list.some(x=>countryKey(x)===countryKey(c))) list.push(c);
+  });
+  return {countries:list, hasNone};
+}
+function activeCountryFilter(){
+  const f = state.countryFilter;
+  if(!f) return '';
+  if(f===COUNTRY_NONE) return countryOptions().hasNone ? f : '';
+  return countryOptions().countries.some(c=>countryKey(c)===f) ? f : '';
+}
+function accPassesCountry(accountId){
+  const f = activeCountryFilter();
+  if(!f) return true;
+  const k = countryKey(accountCountry(accountId));
+  return f===COUNTRY_NONE ? k==='' : k===f;
+}
+function itemPassesCountry(it){
+  if(it.itemType==='transfer') return accPassesCountry(it.fromAccountId) || accPassesCountry(it.toAccountId);
+  return accPassesCountry(it.accountId);
+}
+function countryTx(list){ return activeCountryFilter() ? list.filter(t=>accPassesCountry(t.accountId)) : list; }
+function countryFilterLabel(){
+  const f = activeCountryFilter();
+  if(!f) return '';
+  if(f===COUNTRY_NONE) return 'Sin país';
+  return countryOptions().countries.find(c=>countryKey(c)===f) || '';
+}
+async function setCountryFilter(v){
+  state.countryFilter = v || '';
+  try{ await idb.put('settings', {key:'countryFilter', value:state.countryFilter}); }catch(e){}
+}
+/* Moneda "del país": la más usada entre las cuentas de ese país (empate: la primera). Sin país: la moneda base. */
+function countryCurrency(country){
+  if(!country) return state.baseCurrency;
+  const count = {};
+  state.accounts.forEach(a=>{ if(countryKey(accountCountry(a.id))===countryKey(country)) count[a.currency]=(count[a.currency]||0)+1; });
+  let best = null;
+  Object.keys(count).forEach(cur=>{ if(best===null || count[cur]>count[best]) best = cur; });
+  return best || state.baseCurrency;
+}
+function convertAmount(amount, from, to){
+  if(from===to) return amount;
+  const rate = effectiveRate(to) || 1;
+  return toBase(amount, from) / rate;
+}
+/* Agrupa los movimientos previstos por país de su cuenta; "Sin país" siempre al final */
+function groupCashflowByCountry(items){
+  const groups = new Map();
+  const order = []; state.accounts.forEach(a=>{ const c = accountCountry(a.id); if(c && !order.some(x=>countryKey(x)===countryKey(c))) order.push(c); });
+  items.forEach(it=>{
+    const c = accountCountry(it.accountId);
+    const k = countryKey(c);
+    if(!groups.has(k)) groups.set(k, {country:c, items:[]});
+    groups.get(k).items.push(it);
+  });
+  return [...groups.values()].sort((x,y)=>{
+    if(!x.country) return 1; if(!y.country) return -1;
+    return order.findIndex(o=>countryKey(o)===countryKey(x.country)) - order.findIndex(o=>countryKey(o)===countryKey(y.country));
+  });
+}
+function cashflowItemHtml(it){
+  const sign = it.kind==='income' ? '+' : (it.kind==='transfer' ? '' : '−');
+  return `<div class="budget-row"><div class="budget-top"><div class="budget-cat">${escapeHtml(it.label)}</div><div class="ledger-amount ${it.kind}">${sign}${fmtMoney(it.amount, it.currency).replace('-','')}</div></div><div class="stat-sub">${fmtDate(it.date)}${it.detail ? ' · '+escapeHtml(it.detail) : ''}</div></div>`;
+}
+function cashflowTotals(list, cur){
+  let exp = 0, inc = 0;
+  list.forEach(it=>{
+    const v = convertAmount(it.amount, it.currency, cur);
+    if(it.kind==='income') inc += v; else if(it.kind==='expense') exp += v;
+  });
+  return {exp, inc, net: inc-exp};
+}
 function renderCashflow(){
   const sel = document.getElementById('cashflow-range');
   const listEl = document.getElementById('cashflow-list');
@@ -1589,16 +1704,24 @@ function renderCashflow(){
     totalEl.textContent = '';
     return;
   }
-  let committedExpense = 0, expectedIncome = 0;
-  items.forEach(it=>{
-    const base = toBase(it.amount, it.currency);
-    if(it.kind==='income') expectedIncome += base;
-    else if(it.kind==='expense') committedExpense += base;
-  });
-  totalEl.textContent = `Comprometido: ${fmtMoney(committedExpense)} · Ingresos esperados: ${fmtMoney(expectedIncome)} · Neto: ${fmtMoney(expectedIncome-committedExpense)}`;
-  listEl.innerHTML = items.map(it=>{
-    const sign = it.kind==='income' ? '+' : (it.kind==='transfer' ? '' : '−');
-    return `<div class="budget-row"><div class="budget-top"><div class="budget-cat">${escapeHtml(it.label)}</div><div class="ledger-amount ${it.kind}">${sign}${fmtMoney(it.amount, it.currency).replace('-','')}</div></div><div class="stat-sub">${fmtDate(it.date)}${it.detail ? ' · '+escapeHtml(it.detail) : ''}</div></div>`;
+  const all = cashflowTotals(items, state.baseCurrency);
+  totalEl.textContent = `Comprometido: ${fmtMoney(all.exp)} · Ingresos esperados: ${fmtMoney(all.inc)} · Neto: ${fmtMoney(all.net)}`;
+  const groups = groupCashflowByCountry(items);
+  if(groups.length < 2){
+    listEl.innerHTML = items.map(cashflowItemHtml).join('');
+    return;
+  }
+  const home = (state.defaultCountry || '').trim();
+  listEl.innerHTML = groups.map(g=>{
+    const cur = countryCurrency(g.country);
+    const t = cashflowTotals(g.items, cur);
+    const tb = cashflowTotals(g.items, state.baseCurrency);
+    const name = g.country ? escapeHtml(g.country) : 'Sin país';
+    const small = cur!==state.baseCurrency ? `<div class="stat-sub cf-country-base">≈ ${fmtMoney(tb.net, state.baseCurrency)} en ${state.baseCurrency}</div>` : '';
+    const hint = g.country ? '' : `<div class="stat-sub">Asigna un país a estas cuentas para ordenarlas.${home ? ` <button type="button" class="btn-secondary btn-sm" data-cf-assign-country="1">Asignar ${escapeHtml(home)} a todas</button>` : ''}</div>`;
+    return `<div class="cf-country"><div class="cf-country-head"><div class="cf-country-name">${g.country?'🌍 ':'❔ '}${name} <span class="muted">· ${cur}</span></div><div class="cf-country-net ${t.net<0?'neg':'pos'}">${fmtMoney(t.net, cur)}</div></div>`
+      + `<div class="stat-sub">Comprometido ${fmtMoney(t.exp, cur)} · Ingresos ${fmtMoney(t.inc, cur)} · Neto ${fmtMoney(t.net, cur)}</div>${small}${hint}`
+      + g.items.map(cashflowItemHtml).join('') + `</div>`;
   }).join('');
 }
 
@@ -2016,7 +2139,7 @@ function budgetRowEl(name, spent, limit, categoryId, cardLater){
 let detailRequest = null;
 function monthExpensesNow(){
   const {start:mStart, end:mEnd} = currentMonthRange();
-  return {mStart, mEnd, items: txInRange(state.transactions, mStart, mEnd).filter(t=>t.kind==='expense')};
+  return {mStart, mEnd, items: txInRange(countryTx(state.transactions), mStart, mEnd).filter(t=>t.kind==='expense')};
 }
 function sumBase(list){
   let total = 0;
@@ -2056,7 +2179,7 @@ function detail_monthExpenses(req, d){
 
 function detail_periodTx(req, d){
   const range = periodRange(state.resumenPeriod);
-  const periodTx = txInRange(state.transactions, range.start, range.end);
+  const periodTx = txInRange(countryTx(state.transactions), range.start, range.end);
   let list;
   if(req.type==='pinc'){ list = periodTx.filter(t=>t.kind==='income'); d.title = 'Ingresos del período'; }
   else if(req.type==='pexp'){ list = periodTx.filter(t=>t.kind==='expense'); d.title = 'Gastos del período'; }
@@ -2167,7 +2290,7 @@ function detail_compare(req, d){
   const ref = new Date(state.resumenPeriod.ref+'T00:00:00');
   const prevRef = new Date(ref.getFullYear(), ref.getMonth()-1, 1);
   const tot = (r)=>{
-    const items = txInRange(state.transactions, toISO(startOfMonth(r)), toISO(endOfMonth(r)));
+    const items = txInRange(countryTx(state.transactions), toISO(startOfMonth(r)), toISO(endOfMonth(r)));
     const byCat = {}; let inc=0, exp=0;
     items.forEach(t=>{
       const v = sumBase([t]);
@@ -2329,10 +2452,11 @@ function renderChart(containerId, catSpend, periodTx){
   `;
 }
 
-function mergedLedger(){
+function mergedLedger(byCountry){
   const txItems = state.transactions.map(t=>({...t, itemType:'tx'}));
   const trItems = state.transfers.map(t=>({...t, itemType:'transfer'}));
-  return [...txItems, ...trItems].sort((a,b)=> b.date.localeCompare(a.date) || (b.id-a.id));
+  const all = [...txItems, ...trItems];
+  return (byCountry ? all.filter(itemPassesCountry) : all).sort((a,b)=> b.date.localeCompare(a.date) || (b.id-a.id));
 }
 
 function itemKey(it){ return (it.itemType==='transfer' ? 'tr:' : 'tx:') + it.id; }
@@ -2622,7 +2746,7 @@ function filterAndRenderTx(){
   const catVal = document.getElementById('filter-category').value;
   const searchVal = (document.getElementById('filter-search').value || '').trim().toLowerCase();
 
-  let list = mergedLedger().filter(it => it.date >= range.start && it.date <= range.end);
+  let list = mergedLedger(true).filter(it => it.date >= range.start && it.date <= range.end);
   if(accVal !== 'all'){
     const accId = Number(accVal);
     list = list.filter(it => it.itemType==='transfer' ? (it.fromAccountId===accId || it.toAccountId===accId) : it.accountId===accId);
@@ -2663,7 +2787,7 @@ function filterAndRenderTx(){
   if(sumEl){
     let inc = 0, exp = 0;
     list.forEach(it=>{ if(it.itemType==='transfer') return; if(it.kind==='income') inc += itemBase(it); else exp += itemBase(it); });
-    sumEl.innerHTML = list.length ? `${list.length} movimiento${list.length===1?'':'s'} · Ingresos <strong class="pos">${fmtMoney(inc)}</strong> · Gastos <strong class="neg">${fmtMoney(exp)}</strong> · Neto <strong>${fmtMoney(inc-exp)}</strong>` : '';
+    sumEl.innerHTML = list.length ? `${list.length} movimiento${list.length===1?'':'s'} · Ingresos <strong class="pos">${fmtMoney(inc)}</strong> · Gastos <strong class="neg">${fmtMoney(exp)}</strong> · Neto <strong>${fmtMoney(inc-exp)}</strong>${activeCountryFilter() ? ` · País: <strong>${escapeHtml(countryFilterLabel())}</strong>` : ''}` : '';
   }
   renderSelBar();
   renderSearchExtras(searchVal);
@@ -2876,6 +3000,7 @@ function renderCuentas(){
         <div class="acct-edit-row" id="acct-edit-${a.id}" style="display:none; flex-direction:column; gap:10px;">
           <div class="form-grid">
             <div class="field"><label>Corregir saldo</label><input type="number" step="0.01" data-acct-edit-input="${a.id}" value="${accountBalance(a.id).toFixed(2)}"></div>
+            <div class="field"><label>País</label><input type="text" data-acct-edit-country="${a.id}" value="${escapeHtml(a.country||'')}" placeholder="Ej. España"></div>
             ${isCard ? `
               <div class="field"><label>Día de corte <span class="muted">opcional</span></label><input type="number" min="1" max="31" data-acct-edit-cutoff="${a.id}" value="${a.cutoffDay||''}" placeholder="Ej. 15"></div>
               <div class="field"><label>Día de pago mensual</label><input type="number" min="1" max="31" data-acct-edit-payday="${a.id}" value="${a.paymentDay||''}" placeholder="Ej. 15"></div>
@@ -2921,12 +3046,14 @@ async function moveAccount(id, dir){
 /* ================= Rendering: Presupuestos ================= */
 function renderPresupuestos(){
   const {start:mStart, end:mEnd} = currentMonthRange();
-  const monthExpenses = txInRange(state.transactions, mStart, mEnd).filter(t=>t.kind==='expense');
+  const monthExpenses = txInRange(countryTx(state.transactions), mStart, mEnd).filter(t=>t.kind==='expense');
   const spendByCat = {};
   monthExpenses.forEach(t=>{ const acc=getAccount(t.accountId); const amt=toBase(t.amount, acc?acc.currency:state.baseCurrency); spendByCat[t.categoryId]=(spendByCat[t.categoryId]||0)+amt; });
 
   renderGeneralBudget(monthExpenses, undefined, computeMonthFixedProjection(mStart, mEnd));
   renderCardCashLine('presupuestos-card-cash', mStart, mEnd);
+  const pcn = document.getElementById('presupuestos-country-note');
+  if(pcn){ const lab = countryFilterLabel(); pcn.style.display = lab ? 'block' : 'none'; pcn.textContent = lab ? `Solo gasto de ${lab}. Los límites son el total, de todos los países.` : ''; }
   const cardLater = cardCashView(mStart, mEnd).laterByCat;
 
   const incomeInput = document.getElementById('monthly-income-input');
@@ -4385,10 +4512,13 @@ function setupInstallments(){
 }
 
 /* ================= Rendering: Ajustes ================= */
+let accCountryPrefilled = false;
 function renderAjustes(){
   const sel = document.getElementById('base-currency-select');
   sel.innerHTML = CURRENCIES.map(c=>`<option value="${c}">${c} — ${CURRENCY_META[c].name}</option>`).join('');
   sel.value = state.baseCurrency;
+  const acIn = document.getElementById('acc-country'); if(acIn && !accCountryPrefilled){ accCountryPrefilled = true; if(!acIn.value) acIn.value = state.defaultCountry; }
+  const dcIn = document.getElementById('default-country-input'); if(dcIn && document.activeElement!==dcIn) dcIn.value = state.defaultCountry;
   document.getElementById('dark-mode-toggle').checked = !!state.darkMode;
   document.getElementById('text-scale-select').value = String(state.textScale);
   renderShortcutsList();
@@ -5110,7 +5240,7 @@ function setupAccounts(){
     await loadAll();
     await generateDueCardPayments();
     await loadAll(); renderAll();
-    document.getElementById('acc-name').value=''; document.getElementById('acc-country').value=''; document.getElementById('acc-credit-limit').value=''; document.getElementById('acc-card-cutoff').value=''; document.getElementById('acc-card-payday').value=''; document.getElementById('acc-card-autopay').value='';
+    document.getElementById('acc-name').value=''; document.getElementById('acc-country').value=state.defaultCountry; document.getElementById('acc-credit-limit').value=''; document.getElementById('acc-card-cutoff').value=''; document.getElementById('acc-card-payday').value=''; document.getElementById('acc-card-autopay').value='';
     document.getElementById('acc-credit-limit-field').style.display = 'none';
     document.getElementById('acc-card-payday-field').style.display = 'none';
     document.getElementById('acc-card-autopay-field').style.display = 'none';
@@ -5176,6 +5306,9 @@ function setupAccounts(){
       const current = accountBalance(id);
       const diff = Math.round((newVal - current) * 100) / 100;
       let balanceChanged = false;
+      const countryInput = document.querySelector(`[data-acct-edit-country="${id}"]`);
+      let countryChanged = false;
+      if(countryInput && countryInput.value.trim() !== (acc.country||'').trim()){ acc.country = countryInput.value.trim(); await idb.put('accounts', acc); countryChanged = true; }
       if(Math.abs(diff) >= 0.005){
         const kind = diff > 0 ? 'income' : 'expense';
         const cat = findCategoryByName('Ajuste', kind);
@@ -5201,7 +5334,7 @@ function setupAccounts(){
           cardChanged = true;
         }
       }
-      if(!balanceChanged && !cardChanged){ document.getElementById('acct-edit-'+id).style.display='none'; toast('Sin cambios'); return; }
+      if(!balanceChanged && !cardChanged && !countryChanged){ document.getElementById('acct-edit-'+id).style.display='none'; toast('Sin cambios'); return; }
       await loadAll();
       if(cardChanged) await generateDueCardPayments();
       await loadAll(); renderAll();
@@ -5318,6 +5451,20 @@ function setupAjustes(){
     await idb.put('settings', {key:'baseCurrency', value:e.target.value});
     await loadAll(); renderAll();
     toast('Moneda base actualizada');
+  });
+
+  document.getElementById('default-country-input').addEventListener('change', async (e)=>{
+    state.defaultCountry = e.target.value.trim();
+    await idb.put('settings', {key:'defaultCountry', value:state.defaultCountry});
+    renderAll();
+    toast('País actualizado');
+  });
+  document.addEventListener('click', async (e)=>{
+    if(!e.target.closest('[data-cf-assign-country]')) return;
+    const home = (state.defaultCountry||'').trim(); if(!home) return;
+    for(const a of state.accounts){ if(!(a.country||'').trim()){ a.country = home; await idb.put('accounts', a); } }
+    await loadAll(); renderAll();
+    toast('País asignado: ' + home);
   });
 
   document.getElementById('dark-mode-toggle').addEventListener('change', async (e)=>{
