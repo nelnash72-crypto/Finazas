@@ -161,7 +161,7 @@ let state = {
   recDebtMode:'payment',
   goals:[], recurring:[], reminders:[], debts:[], installments:[], shortcuts:[],
   lastBackupDate:null, backupReminderShown:false, editingTxId:null, editingTransferId:null, accentColor:'#A5842E', darkMode:false, textScale:100, iconPickerTarget:null, generalBudget:0,
-  finStartDay:12,
+  finStartDay:12, useFinMonth:false,
   resumenPeriod:{mode:'month', ref:todayISO()},
   movPeriod:{mode:'month', ref:todayISO()},
   movGroup:'date', selMode:false, sel:new Set(), collapsedCats:new Set(),
@@ -277,6 +277,9 @@ async function loadAll(){
   state.textScale = scaleSetting ? scaleSetting.value : 100;
   const finDaySetting = settings.find(s=>s.key==='finStartDay');
   state.finStartDay = finDaySetting ? clampFinDay(finDaySetting.value) : 12;
+  const finModeSetting = settings.find(s=>s.key==='useFinMonth');
+  state.useFinMonth = !!(finModeSetting && finModeSetting.value);
+  syncFinModes();
   const resumenLayoutSetting = settings.find(s=>s.key==='resumenLayout');
   state.resumenLayout = resumenLayoutSetting ? resumenLayoutSetting.value : defaultResumenLayout();
   state.goals = goals;
@@ -943,6 +946,24 @@ function finMonthRange(refISO){
   if(ref.getDate() < sd) m--;
   return {start: toISO(new Date(y, m, sd)), end: toISO(new Date(y, m+1, sd-1))};
 }
+/* "Mes" global: calendario o financiero (según state.useFinMonth). Todo lo que habla del "mes actual" usa esto. */
+function monthRangeFor(refISO){
+  if(state.useFinMonth) return finMonthRange(refISO);
+  const d = new Date(refISO + "T00:00:00");
+  return {start: toISO(startOfMonth(d)), end: toISO(endOfMonth(d))};
+}
+function currentMonthRange(){ return monthRangeFor(todayISO()); }
+function syncFinModes(){
+  ['resumenPeriod','movPeriod'].forEach(k=>{
+    const p = state[k];
+    if(p && (p.mode==='month' || p.mode==='fmonth')) state[k] = {...p, mode: state.useFinMonth ? 'fmonth' : 'month'};
+  });
+}
+async function setUseFinMonth(on){
+  state.useFinMonth = !!on;
+  syncFinModes();
+  try{ await idb.put('settings', {key:'useFinMonth', value:state.useFinMonth}); }catch(e){}
+}
 function periodRange(period){
   if(period.mode === 'fmonth') return finMonthRange(period.ref);
   if(period.mode === 'range'){
@@ -985,7 +1006,7 @@ function renderPeriodBar(containerId, periodKey, onChange){
   const period = state[periodKey];
   const modes = [['day','Día'],['week','Semana'],['month','Mes'],['year','Año'],['range','Rango']];
   el.innerHTML = `
-    <div class="period-modes">${modes.map(([m,l])=>`<button class="pm-btn ${period.mode===m?'active':''}" data-mode="${m}">${l}</button>`).join('')}</div>
+    <div class="period-modes">${modes.map(([m,l])=>`<button class="pm-btn ${(period.mode===m || (m==='month' && period.mode==='fmonth'))?'active':''}" data-mode="${m}">${m==='month' && state.useFinMonth ? 'Mes fin.' : l}</button>`).join('')}</div>
     ${period.mode==='range'
       ? `<div class="range-inputs"><input type="date" id="${containerId}-start" value="${period.start||todayISO()}"><span style="color:var(--text-faint)">–</span><input type="date" id="${containerId}-end" value="${period.end||todayISO()}"></div>`
       : `<div class="period-nav"><button class="pn-btn" data-nav="-1">‹</button><div class="period-label">${periodLabel(period)}</div><button class="pn-btn" data-nav="1">›</button></div>`
@@ -993,7 +1014,8 @@ function renderPeriodBar(containerId, periodKey, onChange){
   `;
   el.querySelectorAll('.pm-btn').forEach(btn=>{
     btn.addEventListener('click', ()=>{
-      const mode = btn.dataset.mode;
+      let mode = btn.dataset.mode;
+      if(mode==='month' && state.useFinMonth) mode = 'fmonth';
       let np = {...period, mode};
       if(mode==='range' && !np.start){ np.start = todayISO(); np.end = todayISO(); }
       state[periodKey] = np;
@@ -1014,6 +1036,7 @@ function renderPeriodBar(containerId, periodKey, onChange){
 
 /* ================= Rendering: Resumen ================= */
 function renderResumen(){
+  renderFinMonthRow();
   renderQuickAdd();
   renderResumenBlocksContainer();
   renderShortcutsRow();
@@ -1042,8 +1065,7 @@ function renderResumen(){
   renderPaymentAlerts();
   renderCashflow();
 
-  const now = new Date();
-  const mStart = toISO(startOfMonth(now)), mEnd = toISO(endOfMonth(now));
+  const {start:mStart, end:mEnd} = currentMonthRange();
   const monthExpenses = txInRange(state.transactions, mStart, mEnd).filter(t=>t.kind==='expense');
 
   if(document.getElementById('resumen-general-budget')){
@@ -1068,7 +1090,6 @@ function renderResumen(){
 
   if(document.getElementById('resumen-period')){
     renderPeriodBar('resumen-period', 'resumenPeriod', renderResumen);
-    renderFinMonthRow();
     const range = periodRange(state.resumenPeriod);
     const periodTx = txInRange(state.transactions, range.start, range.end);
     let income=0, expense=0, incomeCount=0, expenseCount=0;
@@ -1252,6 +1273,7 @@ function renderResumenBlocksContainer(){
     let html = RESUMEN_BLOCK_HTML[b.id];
     if(b.id==='flujo-caja'){
       html = html.replace('__SEL30__', range==='30' ? 'selected' : '').replace('__SEL60__', range==='60' ? 'selected' : '').replace('__SELMONTH__', range==='month' ? 'selected' : '').replace('__SELNEXT__', range==='next' ? 'selected' : '');
+      if(state.useFinMonth) html = html.replace('Mes actual (lo que falta)', 'Mes financiero (lo que falta)').replace('>Mes siguiente<', '>Mes financiero siguiente<');
     }
     return html;
   }).join('');
@@ -1336,25 +1358,24 @@ function cycleActionsHtml(r){
   return `${r.autoCharge ? '' : `<button type="button" class="btn-secondary btn-sm" data-cycle-pay="${r.id}">Registrar</button>`}
     <label class="date-cal-btn" title="${r.autoCharge?'Cambiar la fecha del próximo cobro':'Posponer / cambiar fecha'}" style="margin-left:0; display:inline-flex; vertical-align:middle;"><span>📅 ${r.autoCharge?'Cambiar fecha':'Posponer'}</span><input type="date" data-cycle-postpone="${r.id}" value="${cycleNextDue(r)}"></label>`;
 }
-/* Selector "Mes / Mes financiero" bajo la barra de periodo del Resumen (solo cuando el periodo es un mes) */
+/* Selector "Mes / Mes financiero": justo bajo el título del Resumen, siempre visible */
 function renderFinMonthRow(){
-  const bar = document.getElementById('resumen-period');
-  const mode = state.resumenPeriod.mode;
-  if(!bar || (mode!=='month' && mode!=='fmonth')) return;
-  const row = document.createElement('div');
-  row.className = 'fin-row';
-  row.innerHTML = `<div class="period-modes"><button type="button" class="pm-btn ${mode==='month'?'active':''}" data-fin="month">Mes</button><button type="button" class="pm-btn ${mode==='fmonth'?'active':''}" data-fin="fmonth">Mes financiero</button></div>`
-    + (mode==='fmonth' ? `<label class="fin-day">Empieza el día <input type="number" id="fin-start-day" min="1" max="28" step="1" value="${clampFinDay(state.finStartDay)}" inputmode="numeric"></label>` : '');
-  bar.appendChild(row);
-  row.querySelectorAll('[data-fin]').forEach(b=> b.addEventListener('click', ()=>{
-    state.resumenPeriod = {...state.resumenPeriod, mode:b.dataset.fin};
-    renderResumen();
+  const row = document.getElementById('fin-selector');
+  if(!row) return;
+  const fin = !!state.useFinMonth;
+  const r = currentMonthRange();
+  const f = x=>new Date(x+'T00:00:00').toLocaleDateString('es-ES',{day:'2-digit',month:'short'});
+  row.innerHTML = `<div class="period-modes"><button type="button" class="pm-btn ${!fin?'active':''}" data-fin="month">Mes</button><button type="button" class="pm-btn ${fin?'active':''}" data-fin="fmonth">Mes financiero</button></div>`
+    + (fin ? `<span class="fin-range">${f(r.start)} – ${f(r.end)}</span><label class="fin-day">Empieza el día <input type="number" id="fin-start-day" min="1" max="28" step="1" value="${clampFinDay(state.finStartDay)}" inputmode="numeric"></label>` : '');
+  row.querySelectorAll('[data-fin]').forEach(b=> b.addEventListener('click', async ()=>{
+    await setUseFinMonth(b.dataset.fin==='fmonth');
+    renderAll();
   }));
   const di = row.querySelector('#fin-start-day');
   if(di) di.addEventListener('change', async ()=>{
     state.finStartDay = clampFinDay(di.value);
     await idb.put('settings', {key:'finStartDay', value:state.finStartDay});
-    renderResumen();
+    renderAll();
   });
 }
 /* Reparto del ingreso: prioritarios (fijos: recurrentes y cuotas) / variables / lo que sobra */
@@ -1519,12 +1540,12 @@ function computeMonthFixedProjection(monthStart, monthEnd){
 }
 function cashflowWindow(range){
   const today = todayISO();
-  const td = new Date(today+"T00:00:00");
   if(range==='month'){
-    return {from: today, to: toISO(new Date(td.getFullYear(), td.getMonth()+1, 0))};
+    return {from: today, to: currentMonthRange().end};
   }
   if(range==='next'){
-    return {from: toISO(new Date(td.getFullYear(), td.getMonth()+1, 1)), to: toISO(new Date(td.getFullYear(), td.getMonth()+2, 0))};
+    const from = addDaysISO(currentMonthRange().end, 1);
+    return {from, to: monthRangeFor(from).end};
   }
   const endD = new Date(today+"T00:00:00"); endD.setDate(endD.getDate()+(Number(range)||30));
   return {from: today, to: toISO(endD)};
@@ -1994,8 +2015,7 @@ function budgetRowEl(name, spent, limit, categoryId, cardLater){
 /* ================= Ventana de detalle (al tocar totales/grupos) ================= */
 let detailRequest = null;
 function monthExpensesNow(){
-  const now = new Date();
-  const mStart = toISO(startOfMonth(now)), mEnd = toISO(endOfMonth(now));
+  const {start:mStart, end:mEnd} = currentMonthRange();
   return {mStart, mEnd, items: txInRange(state.transactions, mStart, mEnd).filter(t=>t.kind==='expense')};
 }
 function sumBase(list){
@@ -2653,7 +2673,7 @@ function filterAndRenderTx(){
 const MOV_QUICK = [{key:'month', label:'Mes actual'}, {key:'30', label:'30 días'}, {key:'90', label:'90 días'}, {key:'year', label:'Este año'}, {key:'all', label:'Todo'}];
 function movQuickPeriod(key){
   const t = todayISO();
-  if(key==='month') return {mode:'month', ref:t};
+  if(key==='month') return {mode: state.useFinMonth ? 'fmonth' : 'month', ref:t};
   if(key==='year') return {mode:'year', ref:t};
   if(key==='30' || key==='90'){
     const d = new Date(t+'T00:00:00'); d.setDate(d.getDate() - (Number(key)-1));
@@ -2900,8 +2920,7 @@ async function moveAccount(id, dir){
 
 /* ================= Rendering: Presupuestos ================= */
 function renderPresupuestos(){
-  const now = new Date();
-  const mStart = toISO(startOfMonth(now)), mEnd = toISO(endOfMonth(now));
+  const {start:mStart, end:mEnd} = currentMonthRange();
   const monthExpenses = txInRange(state.transactions, mStart, mEnd).filter(t=>t.kind==='expense');
   const spendByCat = {};
   monthExpenses.forEach(t=>{ const acc=getAccount(t.accountId); const amt=toBase(t.amount, acc?acc.currency:state.baseCurrency); spendByCat[t.categoryId]=(spendByCat[t.categoryId]||0)+amt; });
@@ -4960,8 +4979,7 @@ function budgetAlertMessage(categoryId){
   if(!categoryId) return null;
   const limit = state.budgets[categoryId];
   if(!limit || limit<=0) return null;
-  const now = new Date();
-  const mStart = toISO(startOfMonth(now)), mEnd = toISO(endOfMonth(now));
+  const {start:mStart, end:mEnd} = currentMonthRange();
   const spend = txInRange(state.transactions, mStart, mEnd).filter(t=>t.kind==='expense' && t.categoryId===categoryId)
     .reduce((s,t)=>{ const acc=getAccount(t.accountId); return s + toBase(t.amount, acc?acc.currency:state.baseCurrency); }, 0);
   const cat = getCategory(categoryId);
